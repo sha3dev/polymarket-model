@@ -1,0 +1,59 @@
+{
+  "name": "@sha3/polymarket-model",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "start": "node --import tsx src/main.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "check": "npm run standards:check && npm run lint && npm run format:check && npm run typecheck && npm run test",
+    "fix": "npm run lint:fix && npm run format:write",
+    "lint": "node scripts/run-biome.mjs check .",
+    "lint:fix": "node scripts/run-biome.mjs check . --write",
+    "format:check": "node scripts/run-biome.mjs format .",
+    "format:write": "node scripts/run-biome.mjs format . --write",
+    "standards:check": "code-standards verify",
+    "typecheck": "tsc --noEmit",
+    "test": "node scripts/run-tests.mjs",
+    "publish": "node scripts/release-publish.mjs"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.19.11",
+    "@sha3/crypto": "^1.1.0",
+    "@sha3/logger": "^2.0.0",
+    "@sha3/polymarket": "1.1.0",
+    "@sha3/polymarket-snapshot": "2.2.0",
+    "@tensorflow/tfjs-node": "^4.22.0",
+    "dotenv": "^17.3.1",
+    "hono": "^4.12.8"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.8",
+    "@sha3/code-standards": "^1.0.0",
+    "@types/node": "^25.5.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sha3dev/polymarket-model"
+  },
+  "codeStandards": {
+    "template": "node-service",
+    "profilePath": null,
+    "withAiAdapters": true,
+    "lastRefactorWith": "1.0.0",
+    "contractVersion": "v2"
+  }
+}
