@@ -1,5 +1,6 @@
 import * as assert from "node:assert/strict";
 import { test } from "node:test";
+
 import type { FlatSnapshot } from "../src/model/model.types.ts";
 import { ModelContextService } from "../src/model/model-context.service.ts";
 import { ModelFeatureService } from "../src/model/model-feature.service.ts";
@@ -28,6 +29,8 @@ const BUILD_SNAPSHOTS = (targetSnapshotMutator?: (snapshot: FlatSnapshot, snapsh
       generated_at: generatedAt,
       btc_chainlink_price: 100_000 + snapshotIndex,
       btc_chainlink_event_ts: generatedAt,
+      eth_chainlink_price: 3_000 + snapshotIndex,
+      eth_chainlink_event_ts: generatedAt,
       btc_5m_slug: "btc-up-5m",
       btc_5m_market_start: "2025-01-01T00:00:00.000Z",
       btc_5m_market_end: "2025-01-01T00:05:00.000Z",
@@ -65,35 +68,51 @@ const BUILD_MODEL_FEATURE_SERVICE = (): ModelFeatureService => {
   return modelFeatureService;
 };
 
-test("ModelFeatureService builds fresh chainlink and encoded clob targets", () => {
+test("ModelFeatureService builds trend samples by asset and clob samples by market", () => {
   const modelFeatureService = BUILD_MODEL_FEATURE_SERVICE();
-  const trainingSamples = modelFeatureService.buildTrainingSamples(BUILD_SNAPSHOTS());
-  const firstSample = trainingSamples[0];
+  const snapshots = BUILD_SNAPSHOTS();
+  const trendSamples = modelFeatureService.buildTrendTrainingSamples(snapshots);
+  const clobSamples = modelFeatureService.buildClobTrainingSamples(snapshots);
+  const firstTrendSample = trendSamples[0];
+  const firstClobSample = clobSamples[0];
 
-  assert.notEqual(firstSample, undefined);
-  assert.equal(firstSample?.trendTarget !== null, true);
-  assert.ok(Math.abs((firstSample?.clobDirectionTarget || 0) - 0.04) < 1e-9);
-  assert.ok(Math.abs((firstSample?.clobTarget || 0) - Math.log(0.56 / 0.44)) < 1e-9);
+  assert.notEqual(firstTrendSample, undefined);
+  assert.notEqual(firstClobSample, undefined);
+  assert.equal(firstTrendSample?.trendKey, "btc");
+  assert.equal(firstClobSample?.modelKey, "btc_5m");
+  assert.equal(firstTrendSample?.trendSequence[0]?.length, modelFeatureService.buildFeatureNames().trendFeatures.length);
+  assert.equal(firstClobSample?.clobSequence[0]?.length, modelFeatureService.buildFeatureNames().clobFeatures.length);
+  assert.ok(Math.abs((firstClobSample?.clobDirectionTarget || 0) - 0.04) < 1e-9);
+  assert.ok(Math.abs((firstClobSample?.clobTarget || 0) - Math.log(0.56 / 0.44)) < 1e-9);
 });
 
-test("ModelFeatureService drops clob targets when the horizon book is stale", () => {
+test("ModelFeatureService keeps trend samples when no active market exists and drops stale clob horizons", () => {
   const modelFeatureService = BUILD_MODEL_FEATURE_SERVICE();
-  const trainingSamples = modelFeatureService.buildTrainingSamples(
-    BUILD_SNAPSHOTS((snapshot, snapshotIndex) => {
-      const updatedSnapshot =
-        snapshotIndex === 239
-          ? {
-              ...snapshot,
-              btc_5m_up_event_ts: snapshot.generated_at - 20_000,
-            }
-          : snapshot;
-      return updatedSnapshot;
-    }),
-  );
-  const firstSample = trainingSamples[0];
+  const snapshots = BUILD_SNAPSHOTS((snapshot, snapshotIndex) => {
+    let updatedSnapshot = snapshot;
 
-  assert.notEqual(firstSample, undefined);
-  assert.equal(firstSample?.clobTarget, null);
-  assert.equal(firstSample?.clobDirectionTarget, null);
-  assert.equal(firstSample?.trendTarget !== null, true);
+    if (snapshotIndex < 220) {
+      updatedSnapshot = {
+        ...updatedSnapshot,
+        btc_5m_slug: null,
+        btc_5m_market_start: null,
+        btc_5m_market_end: null,
+        btc_5m_price_to_beat: null,
+      };
+    }
+
+    if (snapshotIndex === 239) {
+      updatedSnapshot = {
+        ...updatedSnapshot,
+        btc_5m_up_event_ts: snapshot.generated_at - 20_000,
+      };
+    }
+
+    return updatedSnapshot;
+  });
+  const trendSamples = modelFeatureService.buildTrendTrainingSamples(snapshots);
+  const clobSamples = modelFeatureService.buildClobTrainingSamples(snapshots);
+
+  assert.equal(trendSamples.length > 0, true);
+  assert.equal(clobSamples.length, 0);
 });

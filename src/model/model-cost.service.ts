@@ -3,7 +3,7 @@
  */
 
 import config from "../config.ts";
-import type { ModelDirectionProbability, ModelFeatureInput, ModelOrderBookLevel, ModelPredictionPayload } from "./model.types.ts";
+import type { ModelDirectionProbability, ModelOrderBookLevel, ModelPredictionInput, ModelPredictionPayload } from "./model.types.ts";
 
 /**
  * @section consts
@@ -151,15 +151,15 @@ export class ModelCostService {
     return clampedValue;
   }
 
-  private buildTrendFairProbability(input: ModelFeatureInput, predictedReturn: number): number | null {
-    const priceToBeat = input.activeMarket?.priceToBeat || null;
-    const marketEnd = input.activeMarket === null ? null : Date.parse(input.activeMarket.marketEnd);
-    const timeToExpirySeconds = marketEnd === null ? 30 : Math.max(30, (marketEnd - input.decisionTime) / 1_000);
+  private buildTrendFairProbability(input: ModelPredictionInput, predictedReturn: number): number | null {
+    const priceToBeat = input.clobInput.activeMarket?.priceToBeat || null;
+    const marketEnd = input.clobInput.activeMarket === null ? null : Date.parse(input.clobInput.activeMarket.marketEnd);
+    const timeToExpirySeconds = marketEnd === null ? 30 : Math.max(30, (marketEnd - input.trendInput.decisionTime) / 1_000);
     const fairProbability =
-      input.currentChainlinkPrice !== null && input.currentChainlinkPrice > 0 && priceToBeat !== null && priceToBeat > 0
+      input.trendInput.currentChainlinkPrice !== null && input.trendInput.currentChainlinkPrice > 0 && priceToBeat !== null && priceToBeat > 0
         ? this.approximateNormalCdf(
-            Math.log((input.currentChainlinkPrice * Math.exp(predictedReturn)) / priceToBeat) /
-              (input.realizedVolatility30s * Math.sqrt(timeToExpirySeconds / 30) + EPSILON),
+            Math.log((input.trendInput.currentChainlinkPrice * Math.exp(predictedReturn)) / priceToBeat) /
+              (input.trendInput.realizedVolatility30s * Math.sqrt(timeToExpirySeconds / 30) + EPSILON),
           )
         : null;
     return fairProbability;
@@ -168,7 +168,9 @@ export class ModelCostService {
   private buildEstimatedFee(feeRateBps: number | null, executionPrice: number | null): number | null {
     const feeRate = feeRateBps === null ? null : feeRateBps / 10_000;
     const estimatedFee =
-      feeRate !== null && executionPrice !== null ? this.executionSize * executionPrice * feeRate * executionPrice * Math.max(1 - executionPrice, 0) : null;
+      feeRate !== null && executionPrice !== null
+        ? this.executionSize * executionPrice * feeRate * (executionPrice * Math.max(1 - executionPrice, 0)) ** 2
+        : null;
     return estimatedFee;
   }
 
@@ -200,11 +202,11 @@ export class ModelCostService {
     return spreadBuffer;
   }
 
-  private buildTimeWeight(input: ModelFeatureInput): number {
-    const marketEnd = input.activeMarket === null ? null : Date.parse(input.activeMarket.marketEnd);
-    const marketStart = input.activeMarket === null ? null : Date.parse(input.activeMarket.marketStart);
+  private buildTimeWeight(input: ModelPredictionInput): number {
+    const marketEnd = input.clobInput.activeMarket === null ? null : Date.parse(input.clobInput.activeMarket.marketEnd);
+    const marketStart = input.clobInput.activeMarket === null ? null : Date.parse(input.clobInput.activeMarket.marketStart);
     const totalWindow = marketEnd !== null && marketStart !== null ? Math.max(1, marketEnd - marketStart) : 1;
-    const timeToEnd = marketEnd === null ? 0 : Math.max(0, marketEnd - input.decisionTime);
+    const timeToEnd = marketEnd === null ? 0 : Math.max(0, marketEnd - input.clobInput.decisionTime);
     const normalizedTime = timeToEnd / totalWindow;
     const timeWeight = this.clamp(this.fusionAlpha0 + this.fusionAlpha1 * normalizedTime, 0, 1);
     return timeWeight;
@@ -230,7 +232,7 @@ export class ModelCostService {
   }
 
   private buildHeadScore(
-    input: ModelFeatureInput,
+    input: ModelPredictionInput,
     trendEdge: number | null,
     clobEdge: number | null,
     estimatedFee: number | null,
@@ -240,10 +242,10 @@ export class ModelCostService {
     const score =
       trendEdge !== null && clobEdge !== null
         ? this.buildTimeWeight(input) * (trendEdge / Math.max((estimatedFee || 0) + (estimatedSlippage || 0) + (spreadBuffer || 0), 0.001)) +
-          (1 - this.buildTimeWeight(input)) * (clobEdge / Math.max(input.realizedVolatility30s, 0.001))
+          (1 - this.buildTimeWeight(input)) * (clobEdge / Math.max(input.clobInput.realizedVolatility30s, 0.001))
         : clobEdge === null
           ? null
-          : clobEdge / Math.max(input.realizedVolatility30s, 0.001);
+          : clobEdge / Math.max(input.clobInput.realizedVolatility30s, 0.001);
     return score;
   }
 
@@ -271,7 +273,7 @@ export class ModelCostService {
   }
 
   public async buildFusionPayload(
-    input: ModelFeatureInput,
+    input: ModelPredictionInput,
     trendPrediction: { predictedReturn: number; probabilities: ModelDirectionProbability },
     clobPrediction: { predictedUpMid: number; probabilities: ModelDirectionProbability },
   ): Promise<ModelPredictionPayload["fusion"]> {
@@ -281,16 +283,16 @@ export class ModelCostService {
     const fairProbabilityUp = this.buildTrendFairProbability(input, trendPrediction.predictedReturn);
     const fairProbabilityDown = fairProbabilityUp === null ? null : 1 - fairProbabilityUp;
     const predictedDownMid = this.clamp(1 - clobPrediction.predictedUpMid, PROBABILITY_EPSILON, 1 - PROBABILITY_EPSILON);
-    const feeRateBpsUp = await this.readFeeRateBps(input.upTokenId);
-    const feeRateBpsDown = await this.readFeeRateBps(input.downTokenId);
-    const executionPriceUp = this.buildEffectiveExecutionPrice(input.upAskLevels);
-    const executionPriceDown = this.buildEffectiveExecutionPrice(input.downAskLevels);
+    const feeRateBpsUp = await this.readFeeRateBps(input.clobInput.upTokenId);
+    const feeRateBpsDown = await this.readFeeRateBps(input.clobInput.downTokenId);
+    const executionPriceUp = this.buildEffectiveExecutionPrice(input.clobInput.upAskLevels);
+    const executionPriceDown = this.buildEffectiveExecutionPrice(input.clobInput.downAskLevels);
     const estimatedFeeUp = this.buildEstimatedFee(feeRateBpsUp, executionPriceUp);
     const estimatedFeeDown = this.buildEstimatedFee(feeRateBpsDown, executionPriceDown);
-    const estimatedSlippageUp = this.buildEstimatedSlippage(executionPriceUp, input.currentUpMid);
-    const estimatedSlippageDown = this.buildEstimatedSlippage(executionPriceDown, input.currentDownMid);
-    const spreadBufferUp = this.buildSpreadBuffer(input.currentUpAsk, input.currentUpBid);
-    const spreadBufferDown = this.buildSpreadBuffer(input.currentDownAsk, input.currentDownBid);
+    const estimatedSlippageUp = this.buildEstimatedSlippage(executionPriceUp, input.clobInput.currentUpMid);
+    const estimatedSlippageDown = this.buildEstimatedSlippage(executionPriceDown, input.clobInput.currentDownMid);
+    const spreadBufferUp = this.buildSpreadBuffer(input.clobInput.currentUpAsk, input.clobInput.currentUpBid);
+    const spreadBufferDown = this.buildSpreadBuffer(input.clobInput.currentDownAsk, input.clobInput.currentDownBid);
     const trendEdgeUp =
       fairProbabilityUp !== null && executionPriceUp !== null && estimatedFeeUp !== null && estimatedSlippageUp !== null && spreadBufferUp !== null
         ? fairProbabilityUp - executionPriceUp - estimatedFeeUp - estimatedSlippageUp - spreadBufferUp
@@ -299,28 +301,36 @@ export class ModelCostService {
       fairProbabilityDown !== null && executionPriceDown !== null && estimatedFeeDown !== null && estimatedSlippageDown !== null && spreadBufferDown !== null
         ? fairProbabilityDown - executionPriceDown - estimatedFeeDown - estimatedSlippageDown - spreadBufferDown
         : null;
-    let clobEdgeUp = input.currentUpMid === null ? null : clobPrediction.predictedUpMid - input.currentUpMid;
-    let clobEdgeDown = input.currentDownMid === null ? null : predictedDownMid - input.currentDownMid;
+    let clobEdgeUp = input.clobInput.currentUpMid === null ? null : clobPrediction.predictedUpMid - input.clobInput.currentUpMid;
+    let clobEdgeDown = input.clobInput.currentDownMid === null ? null : predictedDownMid - input.clobInput.currentDownMid;
     const mode = fairProbabilityUp === null && this.isClobOnlyFallbackEnabled ? "clob_only" : "full";
     let scoreUp = this.buildHeadScore(input, trendEdgeUp, clobEdgeUp, estimatedFeeUp, estimatedSlippageUp, spreadBufferUp);
     let scoreDown = this.buildHeadScore(input, trendEdgeDown, clobEdgeDown, estimatedFeeDown, estimatedSlippageDown, spreadBufferDown);
 
-    if (!input.isChainlinkFresh) {
+    if (!input.trendInput.isChainlinkFresh) {
       vetoes.push("chainlink_stale");
       hasGlobalVeto = true;
     }
 
-    if (!input.isOrderBookFresh) {
+    if (!input.clobInput.isOrderBookFresh) {
       vetoes.push("order_book_stale");
       hasGlobalVeto = true;
     }
 
-    if (input.currentUpAsk !== null && input.currentUpBid !== null && input.currentUpAsk - input.currentUpBid > this.maxSpread) {
+    if (
+      input.clobInput.currentUpAsk !== null &&
+      input.clobInput.currentUpBid !== null &&
+      input.clobInput.currentUpAsk - input.clobInput.currentUpBid > this.maxSpread
+    ) {
       vetoes.push("spread_too_wide_up");
       scoreUp = null;
     }
 
-    if (input.currentDownAsk !== null && input.currentDownBid !== null && input.currentDownAsk - input.currentDownBid > this.maxSpread) {
+    if (
+      input.clobInput.currentDownAsk !== null &&
+      input.clobInput.currentDownBid !== null &&
+      input.clobInput.currentDownAsk - input.clobInput.currentDownBid > this.maxSpread
+    ) {
       vetoes.push("spread_too_wide_down");
       scoreDown = null;
     }
@@ -355,17 +365,17 @@ export class ModelCostService {
       scoreDown = null;
     }
 
-    if (input.activeMarket?.priceToBeat === null && !this.isClobOnlyFallbackEnabled) {
+    if (input.clobInput.activeMarket?.priceToBeat === null && !this.isClobOnlyFallbackEnabled) {
       vetoes.push("price_to_beat_missing");
       scoreUp = null;
       scoreDown = null;
       hasGlobalVeto = true;
     }
 
-    if (input.activeMarket?.priceToBeat === null && this.isClobOnlyFallbackEnabled) {
+    if (input.clobInput.activeMarket?.priceToBeat === null && this.isClobOnlyFallbackEnabled) {
       reasons.push("running clob-only fallback because price_to_beat is missing");
-      clobEdgeUp = input.currentUpMid === null ? null : clobPrediction.predictedUpMid - input.currentUpMid;
-      clobEdgeDown = input.currentDownMid === null ? null : predictedDownMid - input.currentDownMid;
+      clobEdgeUp = input.clobInput.currentUpMid === null ? null : clobPrediction.predictedUpMid - input.clobInput.currentUpMid;
+      clobEdgeDown = input.clobInput.currentDownMid === null ? null : predictedDownMid - input.clobInput.currentDownMid;
     }
 
     if (feeRateBpsUp === null) {
@@ -422,7 +432,7 @@ export class ModelCostService {
     return fusionPayload;
   }
 
-  public readTrendFairProbability(input: ModelFeatureInput, predictedReturn: number): number | null {
+  public readTrendFairProbability(input: ModelPredictionInput, predictedReturn: number): number | null {
     const fairProbability = this.buildTrendFairProbability(input, predictedReturn);
     return fairProbability;
   }

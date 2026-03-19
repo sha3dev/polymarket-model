@@ -4,6 +4,10 @@ export type ModelWindow = "5m" | "15m";
 
 export type ModelKey = `${ModelAsset}_${ModelWindow}`;
 
+export type ModelTrendKey = ModelAsset;
+
+export type ModelClobKey = ModelKey;
+
 export type ModelState = "idle" | "training" | "ready" | "error";
 
 export type ModelFamily = "tcn";
@@ -44,6 +48,15 @@ export type ModelClassSupport = {
   down: number;
 };
 
+export type ModelHeadMetrics = {
+  regressionMae: number | null;
+  regressionRmse: number | null;
+  regressionHuber: number | null;
+  directionMacroF1: number | null;
+  directionSupport: ModelClassSupport;
+  sampleCount: number;
+};
+
 export type ModelMetrics = {
   trendRegressionMae: number | null;
   trendRegressionRmse: number | null;
@@ -75,8 +88,13 @@ export type ModelStatus = {
   modelFamily: ModelFamily;
   version: number;
   persistedVersion: number;
+  trendModelKey: ModelTrendKey;
+  trendVersion: number;
+  clobVersion: number;
   trendSequenceLength: number;
   clobSequenceLength: number;
+  trendFeatureCount: number;
+  clobFeatureCount: number;
   featureCountTrend: number;
   featureCountClob: number;
   lastTrainingStartedAt: string | null;
@@ -223,14 +241,25 @@ export type ModelFeatureNames = {
   clobFeatures: string[];
 };
 
-export type ModelFeatureInput = {
-  modelKey: ModelKey;
+export type ModelTrendInput = {
+  trendKey: ModelTrendKey;
+  asset: ModelAsset;
+  decisionTime: number;
+  latestSnapshotAt: number;
+  trendSequence: number[][];
+  currentChainlinkPrice: number | null;
+  currentExchangePrice: number | null;
+  realizedVolatility30s: number;
+  isChainlinkFresh: boolean;
+};
+
+export type ModelClobInput = {
+  modelKey: ModelClobKey;
   asset: ModelAsset;
   window: ModelWindow;
   decisionTime: number;
   latestSnapshotAt: number;
   activeMarket: ModelActiveMarket | null;
-  trendSequence: number[][];
   clobSequence: number[][];
   currentUpMid: number | null;
   currentUpBid: number | null;
@@ -251,8 +280,16 @@ export type ModelFeatureInput = {
   downAskLevels: ModelOrderBookLevel[];
 };
 
-export type ModelSequenceSample = ModelFeatureInput & {
+export type ModelPredictionInput = {
+  trendInput: ModelTrendInput;
+  clobInput: ModelClobInput;
+};
+
+export type ModelTrendSample = ModelTrendInput & {
   trendTarget: number | null;
+};
+
+export type ModelClobSample = ModelClobInput & {
   clobTarget: number | null;
   clobDirectionTarget: number | null;
 };
@@ -267,7 +304,7 @@ export type ModelTensorflowArchitecture = {
   sequenceLength: number;
 };
 
-export type ModelTensorflowHeadArtifact = {
+export type ModelHeadArtifact = {
   modelPath: string;
   featureNames: string[];
   featureMedians: number[];
@@ -276,9 +313,11 @@ export type ModelTensorflowHeadArtifact = {
   directionThreshold: number;
   architecture: ModelTensorflowArchitecture;
   targetEncoding: "identity" | "logit_probability";
+  metrics: ModelHeadMetrics;
 };
 
-export type ModelArtifact = {
+export type ModelTrendArtifact = {
+  trendKey: ModelTrendKey;
   version: number;
   trainedAt: string;
   trainingSampleCount: number;
@@ -287,14 +326,32 @@ export type ModelArtifact = {
   lastTrainWindowEnd: string | null;
   lastValidationWindowStart: string | null;
   lastValidationWindowEnd: string | null;
-  metrics: ModelMetrics;
-  trendModel: ModelTensorflowHeadArtifact;
-  clobModel: ModelTensorflowHeadArtifact;
+  model: ModelHeadArtifact;
 };
 
-export type ModelPersistenceModel = {
-  modelKey: ModelKey;
-  artifact: ModelArtifact;
+export type ModelClobArtifact = {
+  modelKey: ModelClobKey;
+  asset: ModelAsset;
+  window: ModelWindow;
+  version: number;
+  trainedAt: string;
+  trainingSampleCount: number;
+  validationSampleCount: number;
+  lastTrainWindowStart: string | null;
+  lastTrainWindowEnd: string | null;
+  lastValidationWindowStart: string | null;
+  lastValidationWindowEnd: string | null;
+  model: ModelHeadArtifact;
+};
+
+export type ModelPersistenceTrendModel = {
+  trendKey: ModelTrendKey;
+  artifact: ModelTrendArtifact;
+};
+
+export type ModelPersistenceClobModel = {
+  modelKey: ModelClobKey;
+  artifact: ModelClobArtifact;
   status: ModelStatus;
 };
 
@@ -302,5 +359,6 @@ export type ModelPersistenceSnapshot = {
   schemaVersion: number;
   lastTrainingCycleAt: string | null;
   lastTrainedSnapshotAt: string | null;
-  models: ModelPersistenceModel[];
+  trendModels: ModelPersistenceTrendModel[];
+  clobModels: ModelPersistenceClobModel[];
 };

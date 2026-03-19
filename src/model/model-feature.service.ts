@@ -6,11 +6,14 @@ import config from "../config.ts";
 import type {
   FlatSnapshot,
   ModelAsset,
-  ModelFeatureInput,
+  ModelClobInput,
+  ModelClobSample,
   ModelFeatureNames,
   ModelKey,
-  ModelSequenceSample,
+  ModelPredictionInput,
   ModelSnapshotContext,
+  ModelTrendInput,
+  ModelTrendSample,
   ModelWindow,
 } from "./model.types.ts";
 import { ModelContextService } from "./model-context.service.ts";
@@ -60,15 +63,6 @@ const TREND_FEATURE_NAMES = [
   "disp_ret_5s",
   "btc_shock",
   "eth_shock",
-  "pm_live_flag",
-  "t_to_end_norm",
-  "t_from_start_norm",
-  "ptb_missing",
-  "moneyness_log",
-  "moneyness_volnorm",
-  "moneyness_chg_30s",
-  "ptb_basis_ex",
-  "ptb_basis_ex_chg_5s",
   "cl_valid_flag",
   "cl_update_recent_60s",
   "ex_valid_gate_flag",
@@ -125,15 +119,11 @@ const CLOB_FEATURE_NAMES = [
   "pm_live_flag",
 ] as const;
 
-const TREND_SEQUENCE_LENGTHS: Record<ModelKey, number> = {
-  btc_5m: 128,
-  btc_15m: 180,
-  eth_5m: 128,
-  eth_15m: 180,
-  sol_5m: 128,
-  sol_15m: 180,
-  xrp_5m: 128,
-  xrp_15m: 180,
+const TREND_SEQUENCE_LENGTHS: Record<ModelAsset, number> = {
+  btc: 180,
+  eth: 180,
+  sol: 180,
+  xrp: 180,
 };
 
 const CLOB_SEQUENCE_LENGTHS: Record<ModelKey, number> = {
@@ -382,19 +372,10 @@ export class ModelFeatureService {
     return decisionIndexes;
   }
 
-  private buildTrendFeatureVector(contexts: ModelSnapshotContext[], index: number, asset: ModelAsset, window: ModelWindow): number[] {
+  private buildTrendFeatureVector(contexts: ModelSnapshotContext[], index: number, asset: ModelAsset): number[] {
     const currentContext = this.readContext(contexts, index);
-    const modelKey = this.buildModelKey(asset, window);
     const assetContext = currentContext.assetContexts[asset];
-    const marketContext = currentContext.marketContexts[modelKey];
     const previous5Context = this.readContextAtOffset(contexts, index, 5_000);
-    const previous30Context = this.readContextAtOffset(contexts, index, 30_000);
-    const priceToBeat = marketContext.activeMarket?.priceToBeat || null;
-    const moneynessLog = this.safeLogRatio(assetContext.chainlinkPrice, priceToBeat);
-    const timeToEndSeconds =
-      marketContext.activeMarket === null ? null : (Date.parse(marketContext.activeMarket.marketEnd) - currentContext.generatedAt) / 1_000;
-    const timeFromStartSeconds =
-      marketContext.activeMarket === null ? null : (currentContext.generatedAt - Date.parse(marketContext.activeMarket.marketStart)) / 1_000;
     const exchangePrice = assetContext.exchangePrice;
     const trendFeatureVector = [
       assetContext.chainlinkPrice === null || assetContext.chainlinkPrice <= 0 ? 0 : Math.log(assetContext.chainlinkPrice),
@@ -436,27 +417,6 @@ export class ModelFeatureService {
       this.signalCacheService.readBreadthReturnStd(contexts, index, asset, 5_000),
       this.computeShock(contexts, index, "btc"),
       this.computeShock(contexts, index, "eth"),
-      marketContext.activeMarket === null ? 0 : 1,
-      this.normalizeTime(window, timeToEndSeconds),
-      this.normalizeTime(window, timeFromStartSeconds),
-      priceToBeat === null ? 1 : 0,
-      moneynessLog,
-      moneynessLog / Math.max(this.signalCacheService.readRealizedVolatility(contexts, index, asset, 30_000), 1e-8),
-      moneynessLog -
-        (previous30Context === null
-          ? 0
-          : this.safeLogRatio(
-              previous30Context.assetContexts[asset].chainlinkPrice,
-              previous30Context.marketContexts[modelKey].activeMarket?.priceToBeat || null,
-            )),
-      this.safeLogRatio(exchangePrice, priceToBeat),
-      this.safeLogRatio(exchangePrice, priceToBeat) -
-        (previous5Context === null
-          ? 0
-          : this.safeLogRatio(
-              previous5Context.assetContexts[asset].exchangePrice,
-              previous5Context.marketContexts[modelKey].activeMarket?.priceToBeat || null,
-            )),
       this.contextService.isChainlinkFresh(assetContext) ? 1 : 0,
       assetContext.chainlinkStaleMs <= 60_000 ? 1 : 0,
       assetContext.exchangeValidPriceCount >= 2 ? 1 : 0,
@@ -529,59 +489,65 @@ export class ModelFeatureService {
     return clobFeatureVector;
   }
 
-  private buildSequence(
-    contexts: ModelSnapshotContext[],
-    index: number,
-    asset: ModelAsset,
-    window: ModelWindow,
-    sequenceLength: number,
-    featureBuilder: (contexts: ModelSnapshotContext[], index: number, asset: ModelAsset, window: ModelWindow) => number[],
-  ): number[][] {
+  private buildTrendSequence(contexts: ModelSnapshotContext[], index: number, asset: ModelAsset): number[][] {
+    const sequenceLength = TREND_SEQUENCE_LENGTHS[asset];
     const startIndex = index - sequenceLength + 1;
-    const sequence = contexts.slice(startIndex, index + 1).map((_, sequenceIndex) => {
-      return featureBuilder(contexts, startIndex + sequenceIndex, asset, window);
+    const trendSequence = contexts.slice(startIndex, index + 1).map((_, sequenceIndex) => {
+      return this.buildTrendFeatureVector(contexts, startIndex + sequenceIndex, asset);
     });
-    return sequence;
+    return trendSequence;
   }
 
-  private buildFeatureInput(contexts: ModelSnapshotContext[], index: number, asset: ModelAsset, window: ModelWindow): ModelFeatureInput | null {
+  private buildClobSequence(contexts: ModelSnapshotContext[], index: number, asset: ModelAsset, window: ModelWindow): number[][] {
     const modelKey = this.buildModelKey(asset, window);
-    const trendSequenceLength = TREND_SEQUENCE_LENGTHS[modelKey];
-    const clobSequenceLength = CLOB_SEQUENCE_LENGTHS[modelKey];
+    const sequenceLength = CLOB_SEQUENCE_LENGTHS[modelKey];
+    const startIndex = index - sequenceLength + 1;
+    const clobSequence = contexts.slice(startIndex, index + 1).map((_, sequenceIndex) => {
+      return this.buildClobFeatureVector(contexts, startIndex + sequenceIndex, asset, window);
+    });
+    return clobSequence;
+  }
+
+  private buildTrendInput(contexts: ModelSnapshotContext[], index: number, asset: ModelAsset): ModelTrendInput | null {
+    const currentContext = this.readContext(contexts, index);
+    const assetContext = currentContext.assetContexts[asset];
+    const canBuildTrendInput = index >= TREND_SEQUENCE_LENGTHS[asset] - 1;
+    let trendInput: ModelTrendInput | null = null;
+
+    if (canBuildTrendInput) {
+      trendInput = {
+        trendKey: asset,
+        asset,
+        decisionTime: currentContext.generatedAt,
+        latestSnapshotAt: currentContext.generatedAt,
+        trendSequence: this.buildTrendSequence(contexts, index, asset),
+        currentChainlinkPrice: assetContext.chainlinkPrice,
+        currentExchangePrice: assetContext.exchangePrice,
+        realizedVolatility30s: this.signalCacheService.readRealizedVolatility(contexts, index, asset, 30_000),
+        isChainlinkFresh: this.contextService.isChainlinkFresh(assetContext),
+      };
+    }
+
+    return trendInput;
+  }
+
+  private buildClobInput(contexts: ModelSnapshotContext[], index: number, asset: ModelAsset, window: ModelWindow): ModelClobInput | null {
+    const modelKey = this.buildModelKey(asset, window);
     const currentContext = this.readContext(contexts, index);
     const marketContext = currentContext.marketContexts[modelKey];
     const assetContext = currentContext.assetContexts[asset];
-    const canBuildSequence = index >= trendSequenceLength - 1 && index >= clobSequenceLength - 1;
-    let featureInput: ModelFeatureInput | null = null;
+    const canBuildClobInput = index >= CLOB_SEQUENCE_LENGTHS[modelKey] - 1;
+    let clobInput: ModelClobInput | null = null;
 
-    if (canBuildSequence && marketContext.activeMarket !== null) {
-      featureInput = {
+    if (canBuildClobInput && marketContext.activeMarket !== null) {
+      clobInput = {
         modelKey,
         asset,
         window,
         decisionTime: currentContext.generatedAt,
         latestSnapshotAt: currentContext.generatedAt,
         activeMarket: marketContext.activeMarket,
-        trendSequence: this.buildSequence(
-          contexts,
-          index,
-          asset,
-          window,
-          trendSequenceLength,
-          (sequenceContexts, sequenceIndex, sequenceAsset, sequenceWindow) => {
-            return this.buildTrendFeatureVector(sequenceContexts, sequenceIndex, sequenceAsset, sequenceWindow);
-          },
-        ),
-        clobSequence: this.buildSequence(
-          contexts,
-          index,
-          asset,
-          window,
-          clobSequenceLength,
-          (sequenceContexts, sequenceIndex, sequenceAsset, sequenceWindow) => {
-            return this.buildClobFeatureVector(sequenceContexts, sequenceIndex, sequenceAsset, sequenceWindow);
-          },
-        ),
+        clobSequence: this.buildClobSequence(contexts, index, asset, window),
         currentUpMid: marketContext.upBook.mid,
         currentUpBid: marketContext.upBook.bid,
         currentUpAsk: marketContext.upBook.ask,
@@ -602,32 +568,21 @@ export class ModelFeatureService {
       };
     }
 
-    return featureInput;
+    return clobInput;
   }
 
-  private buildTrainingSample(contexts: ModelSnapshotContext[], index: number, asset: ModelAsset, window: ModelWindow): ModelSequenceSample | null {
-    const featureInput = this.buildFeatureInput(contexts, index, asset, window);
+  private buildTrendSample(contexts: ModelSnapshotContext[], index: number, asset: ModelAsset): ModelTrendSample | null {
+    const trendInput = this.buildTrendInput(contexts, index, asset);
     const currentContext = this.readContext(contexts, index);
     const targetIndex = this.findContextIndexAtOrAfter(contexts, currentContext.generatedAt + this.predictionHorizonMs);
     const targetContext = targetIndex === -1 ? null : this.readContext(contexts, targetIndex);
-    const modelKey = this.buildModelKey(asset, window);
     const currentAssetContext = currentContext.assetContexts[asset];
     const targetAssetContext = targetContext === null ? null : targetContext.assetContexts[asset];
-    const targetMarketContext = targetContext === null ? null : targetContext.marketContexts[modelKey];
-    const isValidClobTarget =
-      featureInput !== null &&
-      targetContext !== null &&
-      targetMarketContext !== null &&
-      featureInput.activeMarket !== null &&
-      targetMarketContext.activeMarket !== null &&
-      featureInput.currentUpMid !== null &&
-      targetMarketContext.upBook.mid !== null &&
-      this.contextService.isOrderBookFresh(targetMarketContext);
-    let trainingSample: ModelSequenceSample | null = null;
+    let trendSample: ModelTrendSample | null = null;
 
-    if (featureInput !== null) {
-      trainingSample = {
-        ...featureInput,
+    if (trendInput !== null) {
+      trendSample = {
+        ...trendInput,
         trendTarget:
           targetAssetContext !== null &&
           this.contextService.isChainlinkFresh(currentAssetContext) &&
@@ -638,15 +593,42 @@ export class ModelFeatureService {
           targetAssetContext.chainlinkPrice > 0
             ? Math.log(targetAssetContext.chainlinkPrice / currentAssetContext.chainlinkPrice)
             : null,
+      };
+    }
+
+    return trendSample;
+  }
+
+  private buildClobSample(contexts: ModelSnapshotContext[], index: number, asset: ModelAsset, window: ModelWindow): ModelClobSample | null {
+    const clobInput = this.buildClobInput(contexts, index, asset, window);
+    const currentContext = this.readContext(contexts, index);
+    const targetIndex = this.findContextIndexAtOrAfter(contexts, currentContext.generatedAt + this.predictionHorizonMs);
+    const targetContext = targetIndex === -1 ? null : this.readContext(contexts, targetIndex);
+    const modelKey = this.buildModelKey(asset, window);
+    const targetMarketContext = targetContext === null ? null : targetContext.marketContexts[modelKey];
+    const isValidClobTarget =
+      clobInput !== null &&
+      targetContext !== null &&
+      targetMarketContext !== null &&
+      clobInput.activeMarket !== null &&
+      targetMarketContext.activeMarket !== null &&
+      clobInput.currentUpMid !== null &&
+      targetMarketContext.upBook.mid !== null &&
+      this.contextService.isOrderBookFresh(targetMarketContext);
+    let clobSample: ModelClobSample | null = null;
+
+    if (clobInput !== null) {
+      clobSample = {
+        ...clobInput,
         clobTarget: isValidClobTarget ? this.encodeLogitProbability(targetMarketContext.upBook.mid) : null,
         clobDirectionTarget:
-          isValidClobTarget && featureInput.currentUpMid !== null && targetMarketContext.upBook.mid !== null
-            ? targetMarketContext.upBook.mid - featureInput.currentUpMid
+          isValidClobTarget && clobInput.currentUpMid !== null && targetMarketContext.upBook.mid !== null
+            ? targetMarketContext.upBook.mid - clobInput.currentUpMid
             : null,
       };
     }
 
-    return trainingSample;
+    return clobSample;
   }
 
   /**
@@ -661,8 +643,8 @@ export class ModelFeatureService {
     return featureNames;
   }
 
-  public getSequenceLength(modelKey: ModelKey, head: "trend" | "clob"): number {
-    const sequenceLength = head === "trend" ? TREND_SEQUENCE_LENGTHS[modelKey] : CLOB_SEQUENCE_LENGTHS[modelKey];
+  public getSequenceLength(key: ModelAsset | ModelKey, head: "trend" | "clob"): number {
+    const sequenceLength = head === "trend" ? TREND_SEQUENCE_LENGTHS[key as ModelAsset] : CLOB_SEQUENCE_LENGTHS[key as ModelKey];
     return sequenceLength;
   }
 
@@ -681,26 +663,44 @@ export class ModelFeatureService {
     return snapshotContexts;
   }
 
-  public buildTrainingSamples(snapshots: FlatSnapshot[]): ModelSequenceSample[] {
+  public buildTrendTrainingSamples(snapshots: FlatSnapshot[]): ModelTrendSample[] {
     const contexts = this.buildSnapshotContexts(snapshots);
-    const trainingSamples = this.collectDecisionIndexes(contexts).reduce<ModelSequenceSample[]>((sampleList, index) => {
+    const trendSamples = this.collectDecisionIndexes(contexts).reduce<ModelTrendSample[]>((sampleList, index) => {
+      this.supportedAssets.forEach((asset) => {
+        const trendSample = this.buildTrendSample(contexts, index, asset);
+
+        if (trendSample !== null && trendSample.trendTarget !== null) {
+          sampleList.push(trendSample);
+        }
+      });
+      return sampleList;
+    }, []);
+    return trendSamples;
+  }
+
+  public buildClobTrainingSamples(snapshots: FlatSnapshot[]): ModelClobSample[] {
+    const contexts = this.buildSnapshotContexts(snapshots);
+    const clobSamples = this.collectDecisionIndexes(contexts).reduce<ModelClobSample[]>((sampleList, index) => {
       this.supportedAssets.forEach((asset) => {
         this.supportedWindows.forEach((window) => {
-          const trainingSample = this.buildTrainingSample(contexts, index, asset, window);
+          const clobSample = this.buildClobSample(contexts, index, asset, window);
 
-          if (trainingSample !== null && (trainingSample.trendTarget !== null || trainingSample.clobTarget !== null)) {
-            sampleList.push(trainingSample);
+          if (clobSample !== null && clobSample.clobTarget !== null && clobSample.clobDirectionTarget !== null) {
+            sampleList.push(clobSample);
           }
         });
       });
       return sampleList;
     }, []);
-    return trainingSamples;
+    return clobSamples;
   }
 
-  public buildPredictionInput(snapshots: FlatSnapshot[], request: { asset: ModelAsset; window: ModelWindow }): ModelFeatureInput | null {
+  public buildPredictionInput(snapshots: FlatSnapshot[], request: { asset: ModelAsset; window: ModelWindow }): ModelPredictionInput | null {
     const contexts = this.buildSnapshotContexts(snapshots);
-    const predictionInput = contexts.length === 0 ? null : this.buildFeatureInput(contexts, contexts.length - 1, request.asset, request.window);
+    const latestIndex = contexts.length - 1;
+    const trendInput = latestIndex < 0 ? null : this.buildTrendInput(contexts, latestIndex, request.asset);
+    const clobInput = latestIndex < 0 ? null : this.buildClobInput(contexts, latestIndex, request.asset, request.window);
+    const predictionInput = trendInput !== null && clobInput !== null ? { trendInput, clobInput } : null;
     return predictionInput;
   }
 }

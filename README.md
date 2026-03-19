@@ -2,17 +2,18 @@
 
 ## TL;DR
 
-`@sha3/polymarket-model` is a long-running Node service for Polymarket crypto markets. It trains durable TensorFlow TCN models from historical snapshots, restores them on restart, keeps the training cursor on disk, and serves predictions from a live in-memory snapshot buffer.
+`@sha3/polymarket-model` is a long-running Node service for Polymarket crypto markets. Node owns the public API and market logic, while a managed local Python TensorFlow child runtime handles model training and inference transparently. The service restores durable model state on restart, keeps the training cursor on disk, and serves predictions from a live in-memory snapshot buffer.
 
 ## Main Capabilities
 
-- Dual-model TensorFlow runtime per `asset/window`:
-  - `trend` TCN for Chainlink 30-second return forecasting.
-  - `clob` TCN for 30-second-ahead UP midpoint forecasting.
+- Dual-head runtime:
+  - one `trend` TCN per asset for Chainlink 30-second return forecasting;
+  - one `clob` TCN per `asset/window` for 30-second-ahead UP midpoint forecasting.
+- Managed Python TensorFlow child process started automatically by the Node parent service.
 - Canonical 500ms resampling, 30-second decision cadence, and sequence inputs.
 - Shared signal reuse so repeated calculations such as `btc momentum_30s` are computed once per snapshot index.
 - Cost-aware fusion with fee-rate lookup, slippage, spread buffers, and veto rules.
-- Durable artifact persistence with manifest-based restore.
+- Durable split persistence for trend and CLOB artifacts with manifest-based restore.
 - Model status and prediction HTTP endpoints.
 - Continuous retraining with persisted `lastTrainedSnapshotAt`.
 
@@ -26,7 +27,8 @@ The service expects:
 
 - a running `polymarket-snapshot-collector`;
 - access to `@sha3/polymarket-snapshot` for live snapshots;
-- a writable local disk for `MODEL_STATE_DIR`.
+- a writable local disk for `MODEL_STATE_DIR`;
+- macOS or Linux when using the managed Python runtime mode.
 
 ## Installation
 
@@ -42,6 +44,12 @@ Start the service:
 
 ```bash
 SNAPSHOT_COLLECTOR_URL=http://127.0.0.1:3100 npm run start
+```
+
+Bootstrap only the managed Python runtime:
+
+```bash
+npm run bootstrap:python
 ```
 
 Run the full gate:
@@ -100,7 +108,7 @@ Behavior:
 - wires the collector client;
 - wires the live snapshot store;
 - wires the feature pipeline;
-- wires the TensorFlow runtime;
+- wires the managed Python TensorFlow runtime;
 - wires the persistence and HTTP layers.
 
 #### `buildServer()`
@@ -120,6 +128,10 @@ Starts the runtime without binding the HTTP server.
 
 Behavior:
 
+- provisions Python on first run when necessary;
+- creates or reuses the managed virtual environment;
+- installs Python dependencies;
+- starts the local Python child runtime;
 - restores persisted artifacts and status;
 - restores `lastTrainingCycleAt` and `lastTrainedSnapshotAt`;
 - starts the live snapshot stream;
@@ -144,7 +156,8 @@ Behavior:
 
 - clears the training scheduler;
 - stops the live snapshot stream;
-- disposes loaded TensorFlow models;
+- unloads trend and CLOB models from the Python child runtime;
+- terminates the Python child runtime;
 - closes the HTTP server if it is listening.
 
 ### `AppInfoPayload`
@@ -173,7 +186,7 @@ Important fields:
 - `trend.probabilities`: learned direction probabilities from the classification head.
 - `clob.predictedUpMid`: predicted 30-second-ahead UP midpoint.
 - `clob.probabilities`: learned direction probabilities from the CLOB classification head.
-- `fusion.score`: cost-aware decision score.
+- `fusion.scoreUp` / `fusion.scoreDown`: cost-aware executable scores by side.
 - `fusion.shouldTrade`: whether the decision clears all guards.
 - `fusion.mode`: `full` or `clob_only`.
 - `fusion.vetoes`: explicit veto reasons.
@@ -187,11 +200,14 @@ Important fields:
 - `state`;
 - `version`;
 - `persistedVersion`;
+- `trendModelKey`;
+- `trendVersion`;
+- `clobVersion`;
 - `modelFamily`;
 - `trendSequenceLength`;
 - `clobSequenceLength`;
-- `featureCountTrend`;
-- `featureCountClob`;
+- `trendFeatureCount`;
+- `clobFeatureCount`;
 - `lastTrainingStartedAt`;
 - `lastTrainingCompletedAt`;
 - `lastValidationWindowStart`;
@@ -218,7 +234,8 @@ Aggregate response for `GET /models`.
 The runtime follows the strategy described in `deep-research.md`.
 
 1. Load `manifest.json` from `MODEL_STATE_DIR`.
-2. Restore persisted `trend` and `clob` artifacts for every model in the manifest.
+2. Start the managed Python child runtime on `127.0.0.1` and wait for `/health`.
+3. Restore persisted trend artifacts by asset and CLOB artifacts by `asset/window`.
 3. Restore the latest public status snapshot.
 4. Restore `lastTrainingCycleAt` and `lastTrainedSnapshotAt`.
 5. Start the live snapshot stream.
@@ -228,10 +245,11 @@ The runtime follows the strategy described in `deep-research.md`.
 9. Build shared snapshot contexts.
 10. Compute shared derived signals once per snapshot index.
 11. Build CT48 and CB48 sequence inputs.
-12. Train one `trend` TCN and one `clob` TCN per model key.
-13. Persist successful artifacts to disk.
-14. Rewrite the manifest and advance the training cursor.
-15. Serve live predictions from restored or freshly trained artifacts.
+12. Train one `trend` TCN per asset in Python TensorFlow.
+13. Train one `clob` TCN per `asset/window` in Python TensorFlow.
+14. Persist successful artifacts to disk.
+15. Rewrite the manifest and advance the training cursor.
+16. Serve live predictions from restored or freshly trained artifacts.
 
 Historical and live data are not treated as the same dataset. Reuse means sharing derived computations inside a pass, not reusing historical samples as live inference inputs.
 
@@ -278,12 +296,22 @@ Every top-level key from `src/config.ts` is documented here.
 - `MODEL_TF_BATCH_SIZE`: TensorFlow batch size.
 - `MODEL_TF_LEARNING_RATE`: TensorFlow Adam learning rate.
 - `MODEL_TF_EARLY_STOPPING_PATIENCE`: TensorFlow early-stopping patience.
+- `PYTHON_RUNTIME_MODE`: Python runtime mode. `managed` is the supported default.
+- `PYTHON_VERSION`: Python version requested for managed installation.
+- `PYTHON_VENV_DIR`: managed Python virtual environment directory.
+- `PYTHON_SERVICE_HOST`: bind host for the local Python child runtime.
+- `PYTHON_SERVICE_START_TIMEOUT_MS`: health-check timeout while starting Python.
+- `PYTHON_SERVICE_STOP_TIMEOUT_MS`: graceful shutdown timeout before force-kill.
+- `PYTHON_REQUIREMENTS_PATH`: optional override for the generated Python requirements file.
+- `PYTHON_AUTO_INSTALL`: best-effort system installation when `python3` is missing.
+- `PYTHON_INSTALL_STRATEGY`: managed installation strategy. `system-package-manager` is the supported default.
 
 ## Compatibility
 
 The runtime is designed for:
 
 - Node.js with filesystem access;
+- a local Python 3.11-compatible runtime or a supported system package manager;
 - live access to `@sha3/polymarket-snapshot`;
 - historical access to `polymarket-snapshot-collector`;
 - local persistence under `MODEL_STATE_DIR`.
@@ -293,6 +321,7 @@ The runtime is designed for:
 ## Scripts
 
 - `npm run start`: starts the service.
+- `npm run bootstrap:python`: provisions and health-checks the managed Python runtime.
 - `npm run build`: builds `dist/`.
 - `npm run standards:check`: runs the standards verifier.
 - `npm run lint`: runs Biome checks.
@@ -308,7 +337,8 @@ The runtime is designed for:
 - `src/http/`: HTTP server wiring.
 - `src/collector/`: historical snapshot client with short caching.
 - `src/snapshot/`: live in-memory snapshot buffer.
-- `src/model/`: feature extraction, TensorFlow runtime, cost model, persistence, and orchestration.
+- `src/model/`: feature extraction, training orchestration, cost model, persistence, and market runtime orchestration.
+- `src/python/`: managed Python runtime bootstrap, local HTTP client, and generated Python TensorFlow service templates.
 - `test/`: observable behavior tests.
 
 ## Troubleshooting
@@ -318,6 +348,9 @@ The runtime is designed for:
 - Missing fee information: the runtime fails closed and returns a no-trade decision when the fee-rate lookup fails.
 - Lost restart progress: verify `MODEL_STATE_DIR` is writable and that `manifest.json` is present.
 - Repeated collector traffic: confirm `SNAPSHOT_COLLECTOR_CACHE_TTL_MS` is set appropriately.
+- Python bootstrap failure on macOS: install Homebrew or provide `python3` manually.
+- Python bootstrap failure on Linux: ensure `apt-get`, `dnf`, `yum`, or `apk` is available and the process has install permissions.
+- Python child health timeout: inspect startup logs and rerun `npm run bootstrap:python`.
 
 ## AI Workflow
 

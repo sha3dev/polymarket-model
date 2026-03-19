@@ -1,73 +1,18 @@
-import type { LayersModel } from "@tensorflow/tfjs-node";
-
 import type {
-  ModelArtifact,
+  ModelClobArtifact,
+  ModelClobSample,
   ModelDirectionClass,
   ModelDirectionProbability,
-  ModelFeatureInput,
-  ModelMetrics,
-  ModelSequenceSample,
+  ModelHeadArtifact,
+  ModelHeadMetrics,
   ModelTensorflowArchitecture,
-  ModelTensorflowHeadArtifact,
+  ModelTrendArtifact,
+  ModelTrendSample,
 } from "./model.types.ts";
-
-export type ModelLoadedHead = {
-  metadata: ModelTensorflowHeadArtifact;
-  model: LayersModel;
-};
-
-export type ModelLoadedArtifact = {
-  version: number;
-  trainedAt: string;
-  trainingSampleCount: number;
-  validationSampleCount: number;
-  lastTrainWindowStart: string | null;
-  lastTrainWindowEnd: string | null;
-  lastValidationWindowStart: string | null;
-  lastValidationWindowEnd: string | null;
-  metrics: ModelMetrics;
-  trendModel: ModelLoadedHead;
-  clobModel: ModelLoadedHead;
-};
-
-export type ModelArtifactCandidateHead = {
-  architecture: ModelTensorflowArchitecture;
-  classWeights: [number, number, number];
-  directionThreshold: number;
-  featureMedians: number[];
-  featureNames: string[];
-  featureScales: number[];
-  model: LayersModel;
-  targetEncoding: "identity" | "logit_probability";
-};
-
-export type ModelArtifactCandidate = {
-  version: number;
-  trainedAt: string;
-  trainingSampleCount: number;
-  validationSampleCount: number;
-  lastTrainWindowStart: string | null;
-  lastTrainWindowEnd: string | null;
-  lastValidationWindowStart: string | null;
-  lastValidationWindowEnd: string | null;
-  metrics: ModelMetrics;
-  trendModel: ModelArtifactCandidateHead;
-  clobModel: ModelArtifactCandidateHead;
-};
-
-export type ModelPersistenceResult = {
-  artifact: ModelArtifact;
-  loadedArtifact: ModelLoadedArtifact;
-};
 
 export type ModelHeadPrediction = {
   predictedValue: number;
   probabilities: ModelDirectionProbability;
-};
-
-export type ModelPredictionResult = {
-  clob: ModelHeadPrediction;
-  trend: ModelHeadPrediction;
 };
 
 export type ModelLabelingResult = {
@@ -76,20 +21,69 @@ export type ModelLabelingResult = {
   threshold: number;
 };
 
-export type ModelWalkForwardFold = {
-  trainingSamples: ModelSequenceSample[];
-  validationSamples: ModelSequenceSample[];
+export type ModelTrendWalkForwardFold = {
+  trainingSamples: ModelTrendSample[];
+  validationSamples: ModelTrendSample[];
   validationWindowEnd: string | null;
   validationWindowStart: string | null;
 };
 
-export type ModelTrainResult = {
-  artifact: ModelArtifactCandidate | null;
+export type ModelClobWalkForwardFold = {
+  trainingSamples: ModelClobSample[];
+  validationSamples: ModelClobSample[];
+  validationWindowEnd: string | null;
+  validationWindowStart: string | null;
+};
+
+export type ModelTrendTrainResult = {
+  artifact: ModelTrendArtifact | null;
+  trainingSampleCount: number;
+  validationSampleCount: number;
+};
+
+export type ModelClobTrainResult = {
+  artifact: ModelClobArtifact | null;
   trainingSampleCount: number;
   validationSampleCount: number;
 };
 
 export type ModelHeadTrainPayload = {
-  featureInput: Pick<ModelFeatureInput, "clobSequence" | "trendSequence">;
-  regressionTarget: number;
+  architecture: ModelTensorflowArchitecture;
+  featureNames: string[];
+  featurePath: string;
+  trainingSampleCount: number;
+  validationSampleCount: number;
+  lastTrainWindowStart: string | null;
+  lastTrainWindowEnd: string | null;
+  lastValidationWindowStart: string | null;
+  lastValidationWindowEnd: string | null;
+  version: number;
+};
+
+export type ModelPythonHeadArtifact = {
+  artifact: ModelHeadArtifact;
+  trainingSampleCount: number;
+  validationSampleCount: number;
+  lastTrainWindowStart: string | null;
+  lastTrainWindowEnd: string | null;
+  lastValidationWindowStart: string | null;
+  lastValidationWindowEnd: string | null;
+  trainedAt: string;
+};
+
+export type ModelTrendPythonTrainResult = {
+  artifact: ModelPythonHeadArtifact;
+};
+
+export type ModelClobPythonTrainResult = {
+  artifact: ModelPythonHeadArtifact;
+};
+
+export type ModelPythonPredictionResult = {
+  prediction: ModelHeadPrediction;
+};
+
+export type ModelHeadMetricsPair = {
+  clobMetrics: ModelHeadMetrics;
+  trendMetrics: ModelHeadMetrics;
 };

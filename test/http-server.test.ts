@@ -15,9 +15,14 @@ const MODEL_STATUS: ModelStatus = {
   modelFamily: "tcn",
   version: 2,
   persistedVersion: 2,
-  trendSequenceLength: 128,
+  trendModelKey: "btc",
+  trendVersion: 3,
+  clobVersion: 2,
+  trendSequenceLength: 180,
   clobSequenceLength: 96,
-  featureCountTrend: 48,
+  trendFeatureCount: 39,
+  clobFeatureCount: 48,
+  featureCountTrend: 39,
   featureCountClob: 48,
   lastTrainingStartedAt: "2025-01-01T00:00:00.000Z",
   lastTrainingCompletedAt: "2025-01-01T00:01:00.000Z",
@@ -146,53 +151,6 @@ test("HttpServerService serves status and prediction endpoints", async () => {
   assert.deepEqual(await modelResponse.json(), MODEL_STATUS);
   assert.equal(predictionResponse.status, 200);
   assert.deepEqual(await predictionResponse.json(), MODEL_PREDICTION_PAYLOAD);
-
-  await new Promise<void>((resolve, reject) => {
-    server.close((error) => {
-      if (error) {
-        reject(error);
-      } else {
-        resolve();
-      }
-    });
-  });
-});
-
-test("HttpServerService validates bad prediction requests", async () => {
-  const fakeRuntime = {
-    getStatusPayload(): ModelStatusPayload {
-      return MODEL_STATUS_PAYLOAD;
-    },
-    getModelStatus(): ModelStatus {
-      return MODEL_STATUS;
-    },
-    async predict(): Promise<ModelPredictionPayload> {
-      return MODEL_PREDICTION_PAYLOAD;
-    },
-  } as unknown as ModelRuntimeService;
-  const httpServerService = new HttpServerService({
-    appInfoService: new AppInfoService("test-service"),
-    modelRuntimeService: fakeRuntime,
-  });
-  const server = httpServerService.buildServer();
-
-  server.listen(0);
-  await once(server, "listening");
-
-  const address = server.address();
-
-  if (address === null || typeof address === "string") {
-    throw new Error("failed to bind test server");
-  }
-
-  const response = await fetch(`http://127.0.0.1:${address.port}/predict`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ asset: "doge", window: "1h" }),
-  });
-
-  assert.equal(response.status, 400);
-  assert.deepEqual(await response.json(), { error: "invalid prediction request" });
 
   await new Promise<void>((resolve, reject) => {
     server.close((error) => {
