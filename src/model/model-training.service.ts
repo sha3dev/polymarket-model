@@ -155,12 +155,12 @@ export class ModelTrainingService {
   }
 
   private buildTrendModelId(trendKey: ModelTrendKey): string {
-    const modelId = `polymarket-model.trend.${trendKey}`;
+    const modelId = `polymarket_model_trend_${trendKey}`;
     return modelId;
   }
 
   private buildClobModelId(modelKey: ModelClobKey): string {
-    const modelId = `polymarket-model.clob.${modelKey}`;
+    const modelId = `polymarket_model_clob_${modelKey}`;
     return modelId;
   }
 
@@ -172,7 +172,7 @@ export class ModelTrainingService {
 
   private async ensureRemoteModelExists(modelId: string, architecture: ModelTensorflowArchitecture): Promise<void> {
     try {
-      await this.tensorflowApiClientService.readModel(modelId);
+      await this.waitForModelReady(modelId);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : "unknown tensorflow-api error";
       logger.warn(`tensorflow-api readModel failed modelId=${modelId} error=${errorMessage}`);
@@ -183,6 +183,32 @@ export class ModelTrainingService {
 
       logger.info(`creating remote tensorflow-api model modelId=${modelId}`);
       await this.tensorflowApiClientService.createModel(this.tensorflowApiModelDefinitionService.buildCreateModelRequest(modelId, architecture));
+      await this.waitForModelReady(modelId);
+    }
+  }
+
+  private async waitForModelReady(modelId: string): Promise<void> {
+    const startedAt = Date.now();
+    let isReady = false;
+
+    while (!isReady) {
+      const modelRecord = await this.tensorflowApiClientService.readModel(modelId);
+
+      if (modelRecord.status === "failed") {
+        throw new Error(`tensorflow-api model failed modelId=${modelId}`);
+      }
+
+      if (modelRecord.status === "ready") {
+        isReady = true;
+      }
+
+      if (!isReady && Date.now() - startedAt >= this.trainTimeoutMs) {
+        throw new Error(`tensorflow-api model readiness timed out modelId=${modelId} timeoutMs=${this.trainTimeoutMs}`);
+      }
+
+      if (!isReady) {
+        await this.sleep(this.trainPollIntervalMs);
+      }
     }
   }
 

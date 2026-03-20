@@ -27,9 +27,11 @@ test("ModelTrainingService creates remote models, queues weighted training, and 
   const createdModelIds: string[] = [];
   const queuedTrainingRequests: Array<Record<string, unknown>> = [];
   const updatedMetadataPayloads: Record<string, unknown>[] = [];
+  let hasCreatedTrendModel = false;
   const tensorflowApiClientService = {
     async createModel(request: { definition: TensorflowApiModelDefinition; modelId: string }): Promise<TensorflowApiModelRecord> {
       createdModelIds.push(request.modelId);
+      hasCreatedTrendModel = true;
       return {
         createdAt: "2025-01-01T00:00:00.000Z",
         lastPredictionAt: null,
@@ -47,7 +49,7 @@ test("ModelTrainingService creates remote models, queues weighted training, and 
     async ensureReachable(): Promise<void> {},
     async predict(): Promise<{ modelId: string; outputs: Record<string, number[][]> }> {
       return {
-        modelId: "polymarket-model.trend.btc",
+        modelId: "polymarket_model_trend_btc",
         outputs: {
           classification: [[1.5, 0.2, -0.8]],
           regression: [[0.03]],
@@ -59,13 +61,29 @@ test("ModelTrainingService creates remote models, queues weighted training, and 
       return { jobId: "job-1" };
     },
     async readJob(): Promise<{ errorMessage: null; modelId: string; status: "succeeded" }> {
-      return { errorMessage: null, modelId: "polymarket-model.trend.btc", status: "succeeded" };
+      return { errorMessage: null, modelId: "polymarket_model_trend_btc", status: "succeeded" };
     },
     async readJobResult(): Promise<{ modelId: string; status: "succeeded"; trainedAt: string }> {
-      return { modelId: "polymarket-model.trend.btc", status: "succeeded", trainedAt: "2025-01-01T00:10:00.000Z" };
+      return { modelId: "polymarket_model_trend_btc", status: "succeeded", trainedAt: "2025-01-01T00:10:00.000Z" };
     },
     async readModel(): Promise<TensorflowApiModelRecord> {
-      throw new Error("tensorflow-api request failed path=/api/models/polymarket-model.trend.btc status=404 body=not found");
+      if (!hasCreatedTrendModel) {
+        throw new Error("tensorflow-api request failed path=/api/models/polymarket_model_trend_btc status=404 body=not found");
+      }
+
+      return {
+        createdAt: "2025-01-01T00:00:00.000Z",
+        lastPredictionAt: null,
+        lastPredictionJobId: null,
+        lastTrainingAt: null,
+        lastTrainingJobId: null,
+        metadata: null,
+        modelId: "polymarket_model_trend_btc",
+        predictionCount: 0,
+        status: "ready",
+        trainingCount: 0,
+        updatedAt: "2025-01-01T00:00:00.000Z",
+      };
     },
     async readModels(): Promise<TensorflowApiModelRecord[]> {
       return [];
@@ -79,7 +97,7 @@ test("ModelTrainingService creates remote models, queues weighted training, and 
         lastTrainingAt: "2025-01-01T00:10:00.000Z",
         lastTrainingJobId: "job-1",
         metadata: request.metadata,
-        modelId: "polymarket-model.trend.btc",
+        modelId: "polymarket_model_trend_btc",
         predictionCount: 0,
         status: "ready",
         trainingCount: 4,
@@ -115,10 +133,10 @@ test("ModelTrainingService creates remote models, queues weighted training, and 
     BUILD_TREND_SAMPLE(200_000, 0.03),
   ]);
 
-  assert.deepEqual(createdModelIds, ["polymarket-model.trend.btc"]);
+  assert.deepEqual(createdModelIds, ["polymarket_model_trend_btc"]);
   assert.equal(queuedTrainingRequests.length, 1);
   assert.equal((queuedTrainingRequests[0]?.trainingInput as Record<string, unknown>).sampleWeights !== undefined, true);
   assert.equal(updatedMetadataPayloads.length, 1);
-  assert.equal(trendResult.artifact?.remoteModelId, "polymarket-model.trend.btc");
+  assert.equal(trendResult.artifact?.remoteModelId, "polymarket_model_trend_btc");
   assert.equal(trendResult.artifact?.version, 4);
 });
