@@ -53,8 +53,8 @@ This repo is not an order executor. It is a decision engine.
   predicts the short-horizon midpoint movement of the Polymarket UP token for each `asset/window` market.
 - Cost-aware fusion:
   combines both models, then subtracts fee estimates, slippage, and spread buffers.
-- Walk-forward training:
-  trains on older data and validates on newer data to reduce optimistic backtests.
+- Continuous full-history training:
+  keeps training from the beginning of the collector history, while holding out only the newest tail of samples for validation.
 - Remote TensorFlow execution:
   training and inference run through `tensorflow-api`, while this service keeps strategy logic local.
 - Operator dashboard:
@@ -130,12 +130,11 @@ Then open:
 - health root: `http://127.0.0.1:3000/`
 - models: `http://127.0.0.1:3000/models`
 
-For a faster local smoke run, reduce the historical load:
+For a faster local smoke run, reduce the collector page size and TensorFlow workload:
 
 ```bash
-MODEL_HISTORY_LOOKBACK_HOURS=2 \
-MODEL_TRAIN_WINDOW_DAYS=1 \
-MODEL_VALIDATION_WINDOW_DAYS=0.25 \
+SNAPSHOT_COLLECTOR_PAGE_LIMIT=250 \
+MODEL_TF_EPOCHS=5 \
 SNAPSHOT_COLLECTOR_URL=http://192.168.1.2:3000 \
 TENSORFLOW_API_URL=http://192.168.1.2:3100 \
 npm run start
@@ -410,16 +409,12 @@ Response shape includes:
 2. Restore the local runtime cursor from `MODEL_STATE_DIR`.
 3. Restore ready trend and CLOB model metadata from `tensorflow-api`.
 4. Start the live snapshot stream.
-5. Load historical snapshots from the collector.
-6. Merge historical and live snapshots.
-7. Resample to a canonical 500ms grid.
-8. Build asset-level trend samples and market-level CLOB samples.
-9. Fit preprocessing on training folds only.
-10. Queue training jobs in `tensorflow-api`.
-11. Poll remote jobs until they finish or time out.
-12. Refresh the local in-memory model registries from remote metadata.
-13. Persist only the runtime cursor locally.
-14. Serve live predictions and dashboard state from the refreshed registries.
+5. Read one page of historical snapshots from the collector starting at the last trained snapshot cursor.
+6. Train on that page plus the required overlap carryover.
+7. Persist the advanced training cursor immediately after a successful page.
+8. Repeat page-by-page until the service reaches the current historical boundary.
+9. If backlog remains, schedule another catch-up pass quickly instead of waiting for the long retraining interval.
+10. Serve live predictions and dashboard state while catch-up continues in the background.
 
 ## Configuration
 
@@ -433,16 +428,17 @@ Every top-level key exported from [`src/config.ts`](/Users/jc/Documents/GitHub/p
 - `MODEL_STATE_TMP_DIR`: optional temporary-write directory override under the state area.
 - `SNAPSHOT_COLLECTOR_URL`: base URL of the snapshot collector.
 - `SNAPSHOT_COLLECTOR_CACHE_TTL_MS`: cache TTL for repeated collector reads.
-- `SNAPSHOT_COLLECTOR_PAGE_LIMIT`: page size used while paging historical snapshots.
+- `SNAPSHOT_COLLECTOR_PAGE_LIMIT`: page size used while paging historical snapshots. Default `1000`.
+- `SNAPSHOT_COLLECTOR_REQUEST_TIMEOUT_MS`: timeout per collector request attempt.
+- `SNAPSHOT_COLLECTOR_MAX_ATTEMPTS`: maximum retry attempts for retryable collector requests.
+- `SNAPSHOT_COLLECTOR_RETRY_BASE_DELAY_MS`: base backoff for retryable collector requests.
 - `LIVE_SNAPSHOT_INTERVAL_MS`: polling interval for live snapshots.
 - `LIVE_SNAPSHOT_BUFFER_LIMIT`: maximum live snapshots kept in memory.
 - `MODEL_SUPPORTED_ASSETS`: supported assets as a comma-separated env value.
 - `MODEL_SUPPORTED_WINDOWS`: supported windows as a comma-separated env value.
-- `MODEL_HISTORY_LOOKBACK_HOURS`: maximum lookback requested from the collector for retraining. Default `336` means `14` days.
 - `MODEL_TRAINING_INTERVAL_MS`: interval between retraining cycles.
 - `MODEL_DECISION_INTERVAL_MS`: cadence used when building decision points.
 - `MODEL_PREDICTION_HORIZON_MS`: forecast horizon used for targets.
-- `MODEL_EMBARGO_MS`: embargo gap around validation windows.
 - `MODEL_CHAINLINK_STALE_MS`: maximum accepted Chainlink staleness.
 - `MODEL_POLYMARKET_STALE_MS`: maximum accepted Polymarket order-book staleness.
 - `MODEL_MIN_SAMPLE_COUNT`: minimum sample count required before training a head.
@@ -458,13 +454,9 @@ Every top-level key exported from [`src/config.ts`](/Users/jc/Documents/GitHub/p
 - `MODEL_FUSION_ALPHA_1`: slope used by fusion time weighting.
 - `MODEL_VETO_DOWN_THRESHOLD`: probability threshold used for opposite-side vetoes.
 - `MODEL_ENABLE_CLOB_ONLY_FALLBACK`: enables `clob_only` mode when fair-value inputs are missing.
-- `MODEL_TRAIN_WINDOW_DAYS`: walk-forward training window length.
-- `MODEL_VALIDATION_WINDOW_DAYS`: walk-forward validation window length.
-- `MODEL_CLASSIFICATION_WEIGHT`: class-balance training knob retained in the local policy.
 - `MODEL_TF_EPOCHS`: epochs sent to remote training jobs.
 - `MODEL_TF_BATCH_SIZE`: batch size sent to remote training jobs.
 - `MODEL_TF_LEARNING_RATE`: learning rate encoded into generated model definitions.
-- `MODEL_TF_EARLY_STOPPING_PATIENCE`: retained training-policy knob for remote training contracts.
 - `MODEL_EXECUTION_SIZE`: execution size used for fee and slippage estimates.
 - `TENSORFLOW_API_URL`: base URL of the remote `tensorflow-api`.
 - `TENSORFLOW_API_AUTH_TOKEN`: optional bearer token for `tensorflow-api`.
@@ -541,13 +533,13 @@ If one head is missing, wait for training or inspect remote model state.
 
 ### The first training cycle is slow
 
-This is usually caused by a large historical bootstrap window.
+This is usually caused by a large historical backlog or too much work per catch-up cycle.
 
 Reduce:
 
-- `MODEL_HISTORY_LOOKBACK_HOURS`
-- `MODEL_TRAIN_WINDOW_DAYS`
-- `MODEL_VALIDATION_WINDOW_DAYS`
+- `SNAPSHOT_COLLECTOR_PAGE_LIMIT`
+- `MODEL_TF_EPOCHS`
+- `MODEL_TF_BATCH_SIZE`
 
 for smoke runs.
 

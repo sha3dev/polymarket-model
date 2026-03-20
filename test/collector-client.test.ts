@@ -52,3 +52,34 @@ test("CollectorClientService caches repeated requests and paginates snapshots", 
     [Date.parse("2025-01-01T00:00:00.000Z"), Date.parse("2025-01-01T00:00:01.000Z"), Date.parse("2025-01-01T00:00:02.000Z")],
   );
 });
+
+test("CollectorClientService retries transient snapshot failures", async () => {
+  let requestCount = 0;
+  const collectorClientService = new CollectorClientService({
+    baseUrl: "http://collector.local",
+    cacheTtlMs: 60_000,
+    pageLimit: 2,
+    fetcher: async () => {
+      requestCount += 1;
+
+      if (requestCount === 1) {
+        return new Response(JSON.stringify({ error: "busy" }), { status: 500 });
+      }
+
+      return new Response(
+        JSON.stringify({
+          snapshots: [{ generated_at: Date.parse("2025-01-01T00:00:00.000Z") }],
+        }),
+        { status: 200 },
+      );
+    },
+  });
+
+  const snapshots = await collectorClientService.readSnapshotPage({
+    fromDate: "2025-01-01T00:00:00.000Z",
+    toDate: "2025-01-01T00:00:10.000Z",
+  });
+
+  assert.equal(requestCount, 2);
+  assert.deepEqual(snapshots, [{ generated_at: Date.parse("2025-01-01T00:00:00.000Z") }]);
+});

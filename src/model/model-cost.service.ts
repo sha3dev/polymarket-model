@@ -102,7 +102,7 @@ export class ModelCostService {
    */
 
   public static createDefault(): ModelCostService {
-    const modelCostService = new ModelCostService({
+    return new ModelCostService({
       clobBaseUrl: CLOB_BASE_URL,
       executionSize: config.MODEL_EXECUTION_SIZE,
       feeMaxAttempts: config.MODEL_FEE_MAX_ATTEMPTS,
@@ -117,7 +117,6 @@ export class ModelCostService {
       spreadBufferKappa: config.MODEL_SPREAD_BUFFER_KAPPA,
       vetoDownThreshold: config.MODEL_VETO_DOWN_THRESHOLD,
     });
-    return modelCostService;
   }
 
   /**
@@ -170,20 +169,6 @@ export class ModelCostService {
   private clamp(value: number, minimumValue: number, maximumValue: number): number {
     const clampedValue = Math.min(maximumValue, Math.max(minimumValue, value));
     return clampedValue;
-  }
-
-  private buildTrendFairProbability(input: ModelPredictionInput, predictedReturn: number): number | null {
-    const priceToBeat = input.clobInput.activeMarket?.priceToBeat || null;
-    const marketEnd = input.clobInput.activeMarket === null ? null : Date.parse(input.clobInput.activeMarket.marketEnd);
-    const timeToExpirySeconds = marketEnd === null ? 30 : Math.max(30, (marketEnd - input.trendInput.decisionTime) / 1_000);
-    const fairProbability =
-      input.trendInput.currentChainlinkPrice !== null && input.trendInput.currentChainlinkPrice > 0 && priceToBeat !== null && priceToBeat > 0
-        ? this.approximateNormalCdf(
-            Math.log((input.trendInput.currentChainlinkPrice * Math.exp(predictedReturn)) / priceToBeat) /
-              (input.trendInput.realizedVolatility30s * Math.sqrt(timeToExpirySeconds / 30) + EPSILON),
-          )
-        : null;
-    return fairProbability;
   }
 
   private buildEstimatedFee(feeRateBps: number | null, executionPrice: number | null): number | null {
@@ -285,10 +270,9 @@ export class ModelCostService {
     let feeRateBps = cachedFeeRate === undefined ? null : cachedFeeRate;
 
     if (tokenId !== null && cachedFeeRate === undefined) {
-      let attempt = 1;
-      let hasResolved = false;
+      let isFinished = false;
 
-      while (!hasResolved && attempt <= this.feeMaxAttempts) {
+      for (let attempt = 1; attempt <= this.feeMaxAttempts; attempt += 1) {
         const abortController = new AbortController();
         const timeoutId = setTimeout(() => {
           abortController.abort();
@@ -303,7 +287,7 @@ export class ModelCostService {
             const payload = (await response.json()) as { base_fee?: number };
             feeRateBps = typeof payload.base_fee === "number" ? payload.base_fee : null;
             this.setCachedFeeRate(tokenId, feeRateBps);
-            hasResolved = true;
+            isFinished = true;
           } else {
             const canRetry = (response.status === 429 || response.status >= 500) && attempt < this.feeMaxAttempts;
 
@@ -311,7 +295,7 @@ export class ModelCostService {
               logger.warn(`fee-rate retry tokenId=${tokenId} attempt=${attempt} maxAttempts=${this.feeMaxAttempts} status=${response.status}`);
               await this.sleep(this.buildRetryDelay(attempt));
             } else {
-              hasResolved = true;
+              isFinished = true;
             }
           }
         } catch (error) {
@@ -322,13 +306,15 @@ export class ModelCostService {
           if (canRetry) {
             await this.sleep(this.buildRetryDelay(attempt));
           } else {
-            hasResolved = true;
+            isFinished = true;
           }
         } finally {
           clearTimeout(timeoutId);
         }
 
-        attempt += 1;
+        if (isFinished) {
+          break;
+        }
       }
 
       if (feeRateBps === null) {
@@ -348,7 +334,7 @@ export class ModelCostService {
     const vetoes: string[] = [];
     const reasons: string[] = [];
     let hasGlobalVeto = false;
-    const fairProbabilityUp = this.buildTrendFairProbability(input, trendPrediction.predictedReturn);
+    const fairProbabilityUp = this.readTrendFairProbability(input, trendPrediction.predictedReturn);
     const fairProbabilityDown = fairProbabilityUp === null ? null : 1 - fairProbabilityUp;
     const predictedDownMid = this.clamp(1 - clobPrediction.predictedUpMid, PROBABILITY_EPSILON, 1 - PROBABILITY_EPSILON);
     const feeRateBpsUp = await this.readFeeRateBps(input.clobInput.upTokenId);
@@ -501,7 +487,16 @@ export class ModelCostService {
   }
 
   public readTrendFairProbability(input: ModelPredictionInput, predictedReturn: number): number | null {
-    const fairProbability = this.buildTrendFairProbability(input, predictedReturn);
+    const priceToBeat = input.clobInput.activeMarket?.priceToBeat || null;
+    const marketEnd = input.clobInput.activeMarket === null ? null : Date.parse(input.clobInput.activeMarket.marketEnd);
+    const timeToExpirySeconds = marketEnd === null ? 30 : Math.max(30, (marketEnd - input.trendInput.decisionTime) / 1_000);
+    const fairProbability =
+      input.trendInput.currentChainlinkPrice !== null && input.trendInput.currentChainlinkPrice > 0 && priceToBeat !== null && priceToBeat > 0
+        ? this.approximateNormalCdf(
+            Math.log((input.trendInput.currentChainlinkPrice * Math.exp(predictedReturn)) / priceToBeat) /
+              (input.trendInput.realizedVolatility30s * Math.sqrt(timeToExpirySeconds / 30) + EPSILON),
+          )
+        : null;
     return fairProbability;
   }
 }

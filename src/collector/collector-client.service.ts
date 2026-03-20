@@ -3,6 +3,7 @@
  */
 
 import config from "../config.ts";
+import logger from "../logger.ts";
 import type { CollectorMarketSummary, FlatSnapshot } from "../model/model.types.ts";
 
 /**
@@ -22,7 +23,7 @@ type CollectorCacheEntry = {
 };
 
 type CollectorSnapshotQuery = {
-  fromDate: string;
+  fromDate?: string;
   toDate: string;
   limit?: number;
   marketSlug?: string;
@@ -121,23 +122,67 @@ export class CollectorClientService {
     let payload = cachedPayload;
 
     if (payload === null) {
-      const response = await this.fetcher(this.buildUrl(pathname, searchParams));
+      let attempt = 1;
+      let hasResolved = false;
+      let lastError: Error | null = null;
 
-      if (!response.ok) {
-        throw new Error(`collector request failed with status ${response.status} for ${pathname}`);
+      while (!hasResolved && attempt <= config.SNAPSHOT_COLLECTOR_MAX_ATTEMPTS) {
+        const abortController = new AbortController();
+        const timeoutId = setTimeout(() => {
+          abortController.abort();
+        }, config.SNAPSHOT_COLLECTOR_REQUEST_TIMEOUT_MS);
+
+        try {
+          const response = await this.fetcher(this.buildUrl(pathname, searchParams), {
+            signal: abortController.signal,
+          });
+
+          if (!response.ok) {
+            throw new Error(`collector request failed with status ${response.status} for ${pathname}`);
+          }
+
+          payload = (await response.json()) as TPayload;
+          this.setCachedPayload(cacheKey, payload);
+          hasResolved = true;
+        } catch (error) {
+          const normalizedError = error instanceof Error ? error : new Error(`collector request failed for ${pathname}`);
+          const canRetry = this.isRetryableError(normalizedError) && attempt < config.SNAPSHOT_COLLECTOR_MAX_ATTEMPTS;
+          lastError = normalizedError;
+          logger.warn(
+            `collector request issue path=${pathname} attempt=${attempt} maxAttempts=${config.SNAPSHOT_COLLECTOR_MAX_ATTEMPTS} error=${normalizedError.message}`,
+          );
+
+          if (canRetry) {
+            await this.sleep(this.buildRetryDelay(attempt));
+          } else {
+            hasResolved = true;
+          }
+        } finally {
+          clearTimeout(timeoutId);
+        }
+
+        attempt += 1;
       }
 
-      payload = (await response.json()) as TPayload;
-      this.setCachedPayload(cacheKey, payload);
+      if (payload === null && lastError !== null) {
+        throw lastError;
+      }
+    }
+
+    if (payload === null) {
+      throw new Error(`collector request produced no payload for ${pathname}`);
     }
 
     return structuredClone(payload);
   }
 
-  private buildSnapshotSearchParams(query: CollectorSnapshotQuery, cursorFromDate: string, pageLimit: number): URLSearchParams {
+  private buildSnapshotSearchParams(query: CollectorSnapshotQuery, cursorFromDate: string | null, pageLimit: number): URLSearchParams {
     const searchParams = new URLSearchParams();
 
-    searchParams.set("fromDate", cursorFromDate);
+    if (cursorFromDate !== null) {
+      searchParams.set("fromDate", cursorFromDate);
+    }
+
     searchParams.set("toDate", query.toDate);
     searchParams.set("limit", String(pageLimit));
 
@@ -154,6 +199,30 @@ export class CollectorClientService {
     return shouldContinue;
   }
 
+  private buildRetryDelay(attempt: number): number {
+    const retryDelay = config.SNAPSHOT_COLLECTOR_RETRY_BASE_DELAY_MS * 2 ** Math.max(attempt - 1, 0) + Math.floor(Math.random() * 100);
+    return retryDelay;
+  }
+
+  private isRetryableError(error: Error): boolean {
+    const errorMessage = error.message;
+    const isRetryableStatus =
+      errorMessage.includes("status 429") ||
+      errorMessage.includes("status 500") ||
+      errorMessage.includes("status 502") ||
+      errorMessage.includes("status 503") ||
+      errorMessage.includes("status 504");
+    const isRetryableNetworkError = errorMessage.includes("AbortError") || errorMessage.includes("fetch") || errorMessage.includes("network");
+    const isRetryableError = isRetryableStatus || isRetryableNetworkError;
+    return isRetryableError;
+  }
+
+  private async sleep(delayMs: number): Promise<void> {
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, delayMs);
+    });
+  }
+
   /**
    * @section public:methods
    */
@@ -165,7 +234,7 @@ export class CollectorClientService {
   }
 
   public async readSnapshots(query: CollectorSnapshotQuery): Promise<FlatSnapshot[]> {
-    let cursorFromDate = query.fromDate;
+    let cursorFromDate = query.fromDate || null;
     let snapshots: FlatSnapshot[] = [];
     let isPaging = true;
 
@@ -183,6 +252,13 @@ export class CollectorClientService {
       }
     }
 
+    return snapshots;
+  }
+
+  public async readSnapshotPage(query: CollectorSnapshotQuery): Promise<FlatSnapshot[]> {
+    const pageLimit = query.limit === undefined ? this.pageLimit : Math.min(query.limit, this.pageLimit);
+    const payload = await this.readJson<CollectorSnapshotPayload>("/snapshots", this.buildSnapshotSearchParams(query, query.fromDate || null, pageLimit));
+    const snapshots = payload.snapshots;
     return snapshots;
   }
 }

@@ -88,11 +88,9 @@ test("ModelTrainingService creates remote models, queues weighted training, and 
     },
   };
   const modelTrainingService = new ModelTrainingService({
-    embargoMs: 0,
     featureNames: FEATURE_NAMES,
     minSampleCount: 1,
     modelPreprocessingService: ModelPreprocessingService.createDefault(),
-    predictionHorizonMs: 30_000,
     tensorflowApiClientService: tensorflowApiClientService as never,
     tensorflowApiModelDefinitionService: {
       buildCreateModelRequest(modelId: string): { definition: TensorflowApiModelDefinition; modelId: string } {
@@ -108,8 +106,6 @@ test("ModelTrainingService creates remote models, queues weighted training, and 
     } as never,
     trainPollIntervalMs: 1,
     trainTimeoutMs: 1_000,
-    trainWindowDays: 0.002,
-    validationWindowDays: 0.0007,
   });
 
   const trendResult = await modelTrainingService.trainTrend("btc", [

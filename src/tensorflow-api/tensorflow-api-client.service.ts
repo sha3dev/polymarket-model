@@ -67,7 +67,7 @@ export class TensorflowApiClientService {
    */
 
   public static createDefault(): TensorflowApiClientService {
-    const tensorflowApiClientService = new TensorflowApiClientService({
+    return new TensorflowApiClientService({
       authToken: config.TENSORFLOW_API_AUTH_TOKEN,
       baseUrl: config.TENSORFLOW_API_URL,
       fetcher: fetch,
@@ -75,7 +75,6 @@ export class TensorflowApiClientService {
       requestTimeoutMs: config.TENSORFLOW_API_REQUEST_TIMEOUT_MS,
       retryBaseDelayMs: config.TENSORFLOW_API_RETRY_BASE_DELAY_MS,
     });
-    return tensorflowApiClientService;
   }
 
   /**
@@ -115,13 +114,12 @@ export class TensorflowApiClientService {
   }
 
   private async requestJson<TResponse>(pathname: string, method: "GET" | "PATCH" | "POST", payload?: unknown): Promise<TResponse> {
-    let attempt = 1;
     let responsePayload: TResponse | null = null;
-    let shouldContinue = true;
+    let isFinished = false;
     let lastError: Error | null = null;
     let lastStatus: number | null = null;
 
-    while (shouldContinue && attempt <= this.maxAttempts) {
+    for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
       const abortController = new AbortController();
       const timeoutId = setTimeout(() => {
         abortController.abort();
@@ -145,7 +143,7 @@ export class TensorflowApiClientService {
         }
 
         responsePayload = (await response.json()) as TResponse;
-        shouldContinue = false;
+        isFinished = true;
       } catch (error) {
         const normalizedError = error instanceof Error ? error : new Error(`tensorflow-api request failed path=${pathname}`);
         const canRetry = this.isRetryableError(lastStatus, normalizedError) && attempt < this.maxAttempts;
@@ -157,13 +155,15 @@ export class TensorflowApiClientService {
         if (canRetry) {
           await this.sleep(this.buildRetryDelay(attempt));
         } else {
-          shouldContinue = false;
+          isFinished = true;
         }
       } finally {
         clearTimeout(timeoutId);
       }
 
-      attempt += 1;
+      if (isFinished) {
+        break;
+      }
     }
 
     if (responsePayload === null) {

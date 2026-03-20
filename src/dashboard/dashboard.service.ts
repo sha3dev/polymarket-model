@@ -14,8 +14,7 @@ export class DashboardService {
    */
 
   public static createDefault(): DashboardService {
-    const dashboardService = new DashboardService();
-    return dashboardService;
+    return new DashboardService();
   }
 
   /**

@@ -53,6 +53,9 @@ const BUILD_PREDICTION_INPUT = (): ModelPredictionInput => ({
 test("ModelRuntimeService restores remote artifacts and serves predictions", async () => {
   const modelRuntimeService = new ModelRuntimeService({
     collectorClientService: {
+      async readSnapshotPage(): Promise<[]> {
+        return [];
+      },
       async readSnapshots(): Promise<[]> {
         return [];
       },
@@ -261,6 +264,9 @@ test("ModelRuntimeService restores remote artifacts and serves predictions", asy
 test("ModelRuntimeService scheduled wrapper does not leak unexpected cycle failures", async () => {
   const modelRuntimeService = new ModelRuntimeService({
     collectorClientService: {
+      async readSnapshotPage(): Promise<[]> {
+        return [];
+      },
       async readSnapshots(): Promise<[]> {
         return [];
       },

@@ -87,7 +87,6 @@ export type ModelStatus = {
   state: ModelState;
   modelFamily: ModelFamily;
   version: number;
-  persistedVersion: number;
   trendModelKey: ModelTrendKey;
   trendVersion: number;
   clobVersion: number;
@@ -96,13 +95,10 @@ export type ModelStatus = {
   trendFeatureCount: number;
   clobFeatureCount: number;
   headVersionSkew: boolean;
-  featureCountTrend: number;
-  featureCountClob: number;
   lastTrainingStartedAt: string | null;
   lastTrainingCompletedAt: string | null;
   lastValidationWindowStart: string | null;
   lastValidationWindowEnd: string | null;
-  lastRestoredAt: string | null;
   trainingSampleCount: number;
   validationSampleCount: number;
   latestSnapshotAt: string | null;

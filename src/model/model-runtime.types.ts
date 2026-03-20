@@ -3,7 +3,6 @@ import type {
   ModelClobSample,
   ModelDirectionClass,
   ModelDirectionProbability,
-  ModelHeadMetrics,
   ModelTrendArtifact,
   ModelTrendSample,
 } from "./model.types.ts";
@@ -19,16 +18,9 @@ export type ModelLabelingResult = {
   threshold: number;
 };
 
-export type ModelTrendWalkForwardFold = {
-  trainingSamples: ModelTrendSample[];
-  validationSamples: ModelTrendSample[];
-  validationWindowEnd: string | null;
-  validationWindowStart: string | null;
-};
-
-export type ModelClobWalkForwardFold = {
-  trainingSamples: ModelClobSample[];
-  validationSamples: ModelClobSample[];
+export type ModelTrainingSplit<TSample extends ModelClobSample | ModelTrendSample> = {
+  trainingSamples: TSample[];
+  validationSamples: TSample[];
   validationWindowEnd: string | null;
   validationWindowStart: string | null;
 };
@@ -43,9 +35,4 @@ export type ModelClobTrainResult = {
   artifact: ModelClobArtifact | null;
   trainingSampleCount: number;
   validationSampleCount: number;
-};
-
-export type ModelHeadMetricsPair = {
-  clobMetrics: ModelHeadMetrics;
-  trendMetrics: ModelHeadMetrics;
 };

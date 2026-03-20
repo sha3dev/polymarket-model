@@ -45,6 +45,8 @@ type ModelRuntimeServiceOptions = {
   trainingIntervalMs: number;
 };
 
+const UNIX_EPOCH_ISO = "1970-01-01T00:00:00.000Z";
+
 /**
  * @section class
  */
@@ -125,7 +127,7 @@ export class ModelRuntimeService {
 
   public static createDefault(): ModelRuntimeService {
     const modelFeatureService = ModelFeatureService.createDefault();
-    const modelRuntimeService = new ModelRuntimeService({
+    return new ModelRuntimeService({
       collectorClientService: CollectorClientService.createDefault(),
       modelCostService: ModelCostService.createDefault(),
       modelFeatureService,
@@ -138,7 +140,6 @@ export class ModelRuntimeService {
       supportedWindows: config.MODEL_SUPPORTED_WINDOWS as ModelWindow[],
       trainingIntervalMs: config.MODEL_TRAINING_INTERVAL_MS,
     });
-    return modelRuntimeService;
   }
 
   /**
@@ -168,24 +169,23 @@ export class ModelRuntimeService {
   }
 
   private initializeStatuses(): void {
+    const featureNames = this.modelFeatureService.buildFeatureNames();
+    const trendFeatureCount = featureNames.trendFeatures.length;
+    const clobFeatureCount = featureNames.clobFeatures.length;
+
     this.supportedAssets.forEach((asset) => {
       this.supportedWindows.forEach((window) => {
         const modelKey = this.buildModelKey(asset, window);
         const trendSequenceLength = this.modelFeatureService.getSequenceLength(asset, "trend");
         const clobSequenceLength = this.modelFeatureService.getSequenceLength(modelKey, "clob");
-        const trendFeatureCount = this.modelFeatureService.buildFeatureNames().trendFeatures.length;
-        const clobFeatureCount = this.modelFeatureService.buildFeatureNames().clobFeatures.length;
         this.statusRegistry.set(modelKey, {
           activeMarket: null,
           asset,
           clobFeatureCount,
           clobVersion: 0,
           clobSequenceLength,
-          featureCountClob: clobFeatureCount,
-          featureCountTrend: trendFeatureCount,
           headVersionSkew: false,
           lastError: null,
-          lastRestoredAt: null,
           lastTrainingCompletedAt: null,
           lastTrainingStartedAt: null,
           lastValidationWindowEnd: null,
@@ -195,7 +195,6 @@ export class ModelRuntimeService {
           metrics: this.buildBaseMetrics(),
           modelFamily: "tcn",
           modelKey,
-          persistedVersion: 0,
           state: "idle",
           trainingSampleCount: 0,
           trendFeatureCount,
@@ -261,7 +260,6 @@ export class ModelRuntimeService {
       lastValidationWindowStart: clobArtifact?.lastValidationWindowStart || trendArtifact?.lastValidationWindowStart || null,
       headVersionSkew: hasHeadVersionSkew,
       metrics: this.buildCompositeMetrics(currentStatus.asset, modelKey),
-      persistedVersion: clobArtifact?.version || 0,
       state: isReady ? "ready" : currentStatus.state,
       trainingSampleCount: clobArtifact?.trainingSampleCount || trendArtifact?.trainingSampleCount || 0,
       trendVersion: trendArtifact?.version || 0,
@@ -284,21 +282,15 @@ export class ModelRuntimeService {
     });
   }
 
-  private buildOverlapStartTimestamp(): number {
-    const overlapStartTimestamp = Date.now() - config.MODEL_HISTORY_LOOKBACK_HOURS * 60 * 60 * 1_000;
-    return overlapStartTimestamp;
-  }
-
   private buildHistoricalFromDate(): string {
-    const overlapTimestamp = this.lastTrainedSnapshotAt === null ? null : this.lastTrainedSnapshotAt - this.modelFeatureService.getRequiredOverlapMs();
-    const historicalFromTimestamp =
-      overlapTimestamp === null ? this.buildOverlapStartTimestamp() : Math.max(this.buildOverlapStartTimestamp(), overlapTimestamp);
-    const historicalFromDate = new Date(historicalFromTimestamp).toISOString();
+    const overlapTimestamp =
+      this.lastTrainedSnapshotAt === null ? null : Math.max(0, this.lastTrainedSnapshotAt - this.modelFeatureService.getRequiredOverlapMs());
+    const historicalFromDate = overlapTimestamp === null ? UNIX_EPOCH_ISO : new Date(overlapTimestamp).toISOString();
     return historicalFromDate;
   }
 
-  private mergeSnapshots(historicalSnapshots: FlatSnapshot[], liveSnapshots: FlatSnapshot[]): FlatSnapshot[] {
-    const mergedSnapshots = [...historicalSnapshots, ...liveSnapshots]
+  private mergeSnapshots(snapshots: FlatSnapshot[]): FlatSnapshot[] {
+    const mergedSnapshots = [...snapshots]
       .sort((leftSnapshot, rightSnapshot) => leftSnapshot.generated_at - rightSnapshot.generated_at)
       .reduce<FlatSnapshot[]>((snapshotList, snapshot) => {
         const lastSnapshot = snapshotList.at(-1) || null;
@@ -319,6 +311,114 @@ export class ModelRuntimeService {
     return mergedSnapshots;
   }
 
+  private buildCarryoverSnapshots(snapshots: FlatSnapshot[]): FlatSnapshot[] {
+    const requiredOverlapMs = this.modelFeatureService.getRequiredOverlapMs();
+    const latestSnapshotAt = snapshots.at(-1)?.generated_at || null;
+    const carryoverSnapshots = latestSnapshotAt === null ? [] : snapshots.filter((snapshot) => snapshot.generated_at >= latestSnapshotAt - requiredOverlapMs);
+    return carryoverSnapshots;
+  }
+
+  private async runIncrementalTrainingPass(
+    historicalSnapshots: FlatSnapshot[],
+    carryoverSnapshots: FlatSnapshot[],
+  ): Promise<{ clobSampleCount: number; historicalCount: number; trendSampleCount: number }> {
+    const mergedSnapshots = this.mergeSnapshots([...carryoverSnapshots, ...historicalSnapshots]);
+    const trendSamples = this.modelFeatureService.buildTrendTrainingSamples(mergedSnapshots);
+    const clobSamples = this.modelFeatureService.buildClobTrainingSamples(mergedSnapshots);
+
+    for (const asset of this.supportedAssets) {
+      const trendResult = await this.modelTrainingService.trainTrend(
+        asset,
+        trendSamples.filter((sample) => sample.trendKey === asset),
+      );
+
+      if (trendResult.artifact !== null) {
+        this.replaceTrendArtifact(asset, trendResult.artifact);
+        this.logTrainingBlock(asset, trendResult.artifact.version, trendResult.trainingSampleCount, trendResult.validationSampleCount);
+      }
+    }
+
+    for (const asset of this.supportedAssets) {
+      for (const window of this.supportedWindows) {
+        const modelKey = this.buildModelKey(asset, window);
+        const clobResult = await this.modelTrainingService.trainClob(
+          modelKey,
+          clobSamples.filter((sample) => sample.modelKey === modelKey),
+        );
+
+        if (clobResult.artifact !== null) {
+          this.replaceClobArtifact(modelKey, clobResult.artifact);
+          this.logTrainingBlock(modelKey, clobResult.artifact.version, clobResult.trainingSampleCount, clobResult.validationSampleCount);
+        }
+      }
+    }
+
+    this.lastTrainingCycleAt = new Date().toISOString();
+    this.lastTrainedSnapshotAt = historicalSnapshots.at(-1)?.generated_at || this.lastTrainedSnapshotAt;
+    await this.modelRuntimeStateService.persistState(
+      this.lastTrainingCycleAt,
+      this.lastTrainedSnapshotAt === null ? null : new Date(this.lastTrainedSnapshotAt).toISOString(),
+    );
+    this.refreshLiveStatusFields();
+
+    return {
+      clobSampleCount: clobSamples.length,
+      historicalCount: historicalSnapshots.length,
+      trendSampleCount: trendSamples.length,
+    };
+  }
+
+  private async runIncrementalCatchupCycle(): Promise<{
+    clobSampleCount: number;
+    historicalCount: number;
+    passCount: number;
+    trendSampleCount: number;
+  }> {
+    const catchupToDate = new Date().toISOString();
+    const pageLimit = config.SNAPSHOT_COLLECTOR_PAGE_LIMIT;
+    let carryoverSnapshots: FlatSnapshot[] = [];
+    let cursorFromDate = this.buildHistoricalFromDate();
+    let clobSampleCount = 0;
+    let historicalCount = 0;
+    let isCatchingUp = true;
+    let passCount = 0;
+    let trendSampleCount = 0;
+
+    while (isCatchingUp) {
+      const historicalSnapshots = await this.collectorClientService.readSnapshotPage({
+        fromDate: cursorFromDate,
+        limit: pageLimit,
+        toDate: catchupToDate,
+      });
+
+      if (historicalSnapshots.length === 0) {
+        isCatchingUp = false;
+      } else {
+        const passSummary = await this.runIncrementalTrainingPass(historicalSnapshots, carryoverSnapshots);
+        const latestHistoricalSnapshot = historicalSnapshots.at(-1) || null;
+
+        if (latestHistoricalSnapshot !== null && latestHistoricalSnapshot.generated_at < Date.parse(cursorFromDate)) {
+          throw new Error(`collector pagination did not advance cursorFromDate=${cursorFromDate}`);
+        }
+
+        carryoverSnapshots = this.buildCarryoverSnapshots(this.mergeSnapshots([...carryoverSnapshots, ...historicalSnapshots]));
+        cursorFromDate = latestHistoricalSnapshot === null ? cursorFromDate : new Date(latestHistoricalSnapshot.generated_at + 1).toISOString();
+        clobSampleCount = passSummary.clobSampleCount;
+        historicalCount += passSummary.historicalCount;
+        passCount += 1;
+        trendSampleCount = passSummary.trendSampleCount;
+        isCatchingUp = historicalSnapshots.length === pageLimit;
+      }
+    }
+
+    return {
+      clobSampleCount,
+      historicalCount,
+      passCount,
+      trendSampleCount,
+    };
+  }
+
   private parseHeadMetadata(rawMetadata: Record<string, unknown> | null): TensorflowApiHeadMetadata | null {
     let headMetadata: TensorflowApiHeadMetadata | null = null;
 
@@ -329,7 +429,7 @@ export class ModelRuntimeService {
     return headMetadata;
   }
 
-  private restoreArtifactFromRemoteRecord(modelRecord: TensorflowApiModelRecord): void {
+  private applyRemoteModelRecord(modelRecord: TensorflowApiModelRecord): void {
     const headMetadata = this.parseHeadMetadata(modelRecord.metadata);
 
     if (modelRecord.status === "ready" && headMetadata !== null) {
@@ -388,11 +488,6 @@ export class ModelRuntimeService {
         });
       }
     }
-  }
-
-  private markRemoteFailure(modelRecord: TensorflowApiModelRecord): void {
-    const headMetadata = this.parseHeadMetadata(modelRecord.metadata);
-
     if (modelRecord.status === "failed" && headMetadata !== null && headMetadata.logicalModelType === "clob") {
       this.updateStatus(headMetadata.logicalKey as ModelClobKey, {
         lastError: `remote model failed modelId=${modelRecord.modelId}`,
@@ -411,8 +506,7 @@ export class ModelRuntimeService {
     if (this.shouldRestoreOnStart) {
       const remoteModelRecords = await this.modelTrainingService.readRemoteModels();
       remoteModelRecords.forEach((modelRecord) => {
-        this.restoreArtifactFromRemoteRecord(modelRecord);
-        this.markRemoteFailure(modelRecord);
+        this.applyRemoteModelRecord(modelRecord);
       });
       this.statusRegistry.forEach((_status, modelKey) => {
         this.refreshModelStatus(modelKey);
@@ -460,18 +554,6 @@ export class ModelRuntimeService {
     if (this.shouldLogTrainingProgress) {
       logger.info(`training block completed model=${modelKey} version=${version} train=${trainingSampleCount} valid=${validationSampleCount}`);
     }
-  }
-
-  private buildStatusPayload(): ModelStatusPayload {
-    const models = [...this.statusRegistry.values()].sort((leftStatus, rightStatus) => leftStatus.modelKey.localeCompare(rightStatus.modelKey));
-    const statusPayload: ModelStatusPayload = {
-      isTrainingCycleRunning: this.isTrainingCycleRunning,
-      lastTrainingCycleAt: this.lastTrainingCycleAt,
-      latestSnapshotAt: models.at(0)?.latestSnapshotAt || null,
-      liveSnapshotCount: models.at(0)?.liveSnapshotCount || 0,
-      models,
-    };
-    return statusPayload;
   }
 
   private async runScheduledTrainingCycle(): Promise<void> {
@@ -522,11 +604,11 @@ export class ModelRuntimeService {
       await this.restorePersistedState();
       await this.snapshotStoreService.start();
       this.refreshLiveStatusFields();
-      await this.runTrainingCycle();
+      this.isStarted = true;
       this.trainingTimer = setInterval(() => {
         void this.runScheduledTrainingCycle();
       }, this.trainingIntervalMs);
-      this.isStarted = true;
+      void this.runScheduledTrainingCycle();
     }
   }
 
@@ -550,52 +632,10 @@ export class ModelRuntimeService {
 
       try {
         const cycleStartedAt = Date.now();
-        const historicalSnapshots = await this.collectorClientService.readSnapshots({
-          fromDate: this.buildHistoricalFromDate(),
-          toDate: new Date().toISOString(),
-        });
-        const liveSnapshots = this.snapshotStoreService.getLiveSnapshots();
-        const mergedSnapshots = this.mergeSnapshots(historicalSnapshots, liveSnapshots);
-        const trendSamples = this.modelFeatureService.buildTrendTrainingSamples(mergedSnapshots);
-        const clobSamples = this.modelFeatureService.buildClobTrainingSamples(mergedSnapshots);
-
-        for (const asset of this.supportedAssets) {
-          const trendResult = await this.modelTrainingService.trainTrend(
-            asset,
-            trendSamples.filter((sample) => sample.trendKey === asset),
-          );
-
-          if (trendResult.artifact !== null) {
-            this.replaceTrendArtifact(asset, trendResult.artifact);
-            this.logTrainingBlock(asset, trendResult.artifact.version, trendResult.trainingSampleCount, trendResult.validationSampleCount);
-          }
-        }
-
-        for (const asset of this.supportedAssets) {
-          for (const window of this.supportedWindows) {
-            const modelKey = this.buildModelKey(asset, window);
-            const clobResult = await this.modelTrainingService.trainClob(
-              modelKey,
-              clobSamples.filter((sample) => sample.modelKey === modelKey),
-            );
-
-            if (clobResult.artifact !== null) {
-              this.replaceClobArtifact(modelKey, clobResult.artifact);
-              this.logTrainingBlock(modelKey, clobResult.artifact.version, clobResult.trainingSampleCount, clobResult.validationSampleCount);
-            }
-          }
-        }
-
-        this.lastTrainingCycleAt = new Date().toISOString();
-        this.lastTrainedSnapshotAt = mergedSnapshots.at(-1)?.generated_at || this.lastTrainedSnapshotAt;
-        await this.modelRuntimeStateService.persistState(
-          this.lastTrainingCycleAt,
-          this.lastTrainedSnapshotAt === null ? null : new Date(this.lastTrainedSnapshotAt).toISOString(),
-        );
+        const passSummary = await this.runIncrementalCatchupCycle();
         this.isTrainingCycleRunning = false;
-        this.refreshLiveStatusFields();
         logger.info(
-          `training cycle completed trendModels=${this.trendArtifactRegistry.size} clobModels=${this.clobArtifactRegistry.size} historical=${historicalSnapshots.length} live=${liveSnapshots.length} trendSamples=${trendSamples.length} clobSamples=${clobSamples.length} durationMs=${Date.now() - cycleStartedAt}`,
+          `training cycle completed trendModels=${this.trendArtifactRegistry.size} clobModels=${this.clobArtifactRegistry.size} historical=${passSummary.historicalCount} live=${this.snapshotStoreService.getLiveSnapshots().length} trendSamples=${passSummary.trendSampleCount} clobSamples=${passSummary.clobSampleCount} passes=${passSummary.passCount} durationMs=${Date.now() - cycleStartedAt}`,
         );
       } catch (error) {
         logger.error(`training cycle catch error=${error instanceof Error ? error.message : "unknown error"}`);
@@ -605,13 +645,18 @@ export class ModelRuntimeService {
   }
 
   public getStatusPayload(): ModelStatusPayload {
-    const statusPayload = this.buildStatusPayload();
-    return statusPayload;
+    const models = [...this.statusRegistry.values()].sort((leftStatus, rightStatus) => leftStatus.modelKey.localeCompare(rightStatus.modelKey));
+    return {
+      isTrainingCycleRunning: this.isTrainingCycleRunning,
+      lastTrainingCycleAt: this.lastTrainingCycleAt,
+      latestSnapshotAt: models.at(0)?.latestSnapshotAt || null,
+      liveSnapshotCount: models.at(0)?.liveSnapshotCount || 0,
+      models,
+    };
   }
 
   public getModelStatus(asset: ModelAsset, window: ModelWindow): ModelStatus {
-    const modelStatus = this.getStatus(this.buildModelKey(asset, window));
-    return modelStatus;
+    return this.getStatus(this.buildModelKey(asset, window));
   }
 
   public async predict(request: ModelPredictionRequest): Promise<ModelPredictionPayload> {
@@ -641,7 +686,6 @@ export class ModelRuntimeService {
         probabilities: clobPrediction.probabilities,
       },
     );
-    const predictionPayload = this.buildPredictionPayload(predictionInput, trendPrediction, clobPrediction, fusionPayload);
-    return predictionPayload;
+    return this.buildPredictionPayload(predictionInput, trendPrediction, clobPrediction, fusionPayload);
   }
 }

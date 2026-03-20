@@ -20,13 +20,7 @@ import type {
   ModelTrendSample,
 } from "./model.types.ts";
 import { ModelPreprocessingService } from "./model-preprocessing.service.ts";
-import type {
-  ModelClobTrainResult,
-  ModelClobWalkForwardFold,
-  ModelHeadPrediction,
-  ModelTrendTrainResult,
-  ModelTrendWalkForwardFold,
-} from "./model-runtime.types.ts";
+import type { ModelClobTrainResult, ModelHeadPrediction, ModelTrainingSplit, ModelTrendTrainResult } from "./model-runtime.types.ts";
 
 /**
  * @section consts
@@ -50,22 +44,20 @@ const CLOB_ARCHITECTURES: Record<ModelClobKey, ModelTensorflowArchitecture> = {
   xrp_15m: { family: "tcn", blockCount: 6, channelCount: 64, dilations: [1, 2, 4, 8, 16, 32], dropout: 0.15, featureCount: 0, sequenceLength: 0 },
 };
 
+const VALIDATION_SAMPLE_RATIO = 0.2;
+
 /**
  * @section types
  */
 
 type ModelTrainingServiceOptions = {
-  embargoMs: number;
   featureNames: ModelFeatureNames;
   minSampleCount: number;
   modelPreprocessingService: ModelPreprocessingService;
-  predictionHorizonMs: number;
   tensorflowApiClientService: TensorflowApiClientService;
   tensorflowApiModelDefinitionService: TensorflowApiModelDefinitionService;
   trainPollIntervalMs: number;
   trainTimeoutMs: number;
-  trainWindowDays: number;
-  validationWindowDays: number;
 };
 
 /**
@@ -77,15 +69,11 @@ export class ModelTrainingService {
    * @section private:attributes
    */
 
-  private readonly embargoMs: number;
-
   private readonly featureNames: ModelFeatureNames;
 
   private readonly minSampleCount: number;
 
   private readonly modelPreprocessingService: ModelPreprocessingService;
-
-  private readonly predictionHorizonMs: number;
 
   private readonly tensorflowApiClientService: TensorflowApiClientService;
 
@@ -95,26 +83,18 @@ export class ModelTrainingService {
 
   private readonly trainTimeoutMs: number;
 
-  private readonly trainWindowDays: number;
-
-  private readonly validationWindowDays: number;
-
   /**
    * @section constructor
    */
 
   public constructor(options: ModelTrainingServiceOptions) {
-    this.embargoMs = options.embargoMs;
     this.featureNames = options.featureNames;
     this.minSampleCount = options.minSampleCount;
     this.modelPreprocessingService = options.modelPreprocessingService;
-    this.predictionHorizonMs = options.predictionHorizonMs;
     this.tensorflowApiClientService = options.tensorflowApiClientService;
     this.tensorflowApiModelDefinitionService = options.tensorflowApiModelDefinitionService;
     this.trainPollIntervalMs = options.trainPollIntervalMs;
     this.trainTimeoutMs = options.trainTimeoutMs;
-    this.trainWindowDays = options.trainWindowDays;
-    this.validationWindowDays = options.validationWindowDays;
   }
 
   /**
@@ -122,105 +102,38 @@ export class ModelTrainingService {
    */
 
   public static createDefault(featureNames: ModelFeatureNames): ModelTrainingService {
-    const modelTrainingService = new ModelTrainingService({
-      embargoMs: config.MODEL_EMBARGO_MS,
+    return new ModelTrainingService({
       featureNames,
       minSampleCount: config.MODEL_MIN_SAMPLE_COUNT,
       modelPreprocessingService: ModelPreprocessingService.createDefault(),
-      predictionHorizonMs: config.MODEL_PREDICTION_HORIZON_MS,
       tensorflowApiClientService: TensorflowApiClientService.createDefault(),
       tensorflowApiModelDefinitionService: TensorflowApiModelDefinitionService.createDefault(),
       trainPollIntervalMs: config.TENSORFLOW_API_TRAIN_POLL_INTERVAL_MS,
       trainTimeoutMs: config.TENSORFLOW_API_TRAIN_TIMEOUT_MS,
-      trainWindowDays: config.MODEL_TRAIN_WINDOW_DAYS,
-      validationWindowDays: config.MODEL_VALIDATION_WINDOW_DAYS,
     });
-    return modelTrainingService;
   }
 
   /**
    * @section private:methods
    */
 
-  private buildTrendSpanStart(sample: ModelTrendSample): number {
-    const trendSpanStart = sample.decisionTime - sample.trendSequence.length * 500;
-    return trendSpanStart;
-  }
+  private buildTrainingSplit<TSample extends ModelClobSample | ModelTrendSample>(samples: TSample[]): ModelTrainingSplit<TSample> | null {
+    const validationSampleCount = Math.max(1, Math.floor(samples.length * VALIDATION_SAMPLE_RATIO));
+    const trainingCutoffIndex = samples.length - validationSampleCount;
+    const trainingSamples = samples.slice(0, trainingCutoffIndex);
+    const validationSamples = samples.slice(trainingCutoffIndex);
+    let trainingSplit: ModelTrainingSplit<TSample> | null = null;
 
-  private buildClobSpanStart(sample: ModelClobSample): number {
-    const clobSpanStart = sample.decisionTime - sample.clobSequence.length * 500;
-    return clobSpanStart;
-  }
-
-  private buildSpanEnd(decisionTime: number): number {
-    const spanEnd = decisionTime + this.predictionHorizonMs;
-    return spanEnd;
-  }
-
-  private buildTrendFolds(samples: ModelTrendSample[]): ModelTrendWalkForwardFold[] {
-    const foldWindowMs = this.validationWindowDays * 24 * 60 * 60 * 1_000;
-    const trainWindowMs = this.trainWindowDays * 24 * 60 * 60 * 1_000;
-    const latestDecisionTime = samples.at(-1)?.decisionTime || 0;
-    let validationWindowEnd = latestDecisionTime;
-    const folds: ModelTrendWalkForwardFold[] = [];
-
-    while (validationWindowEnd > 0) {
-      const validationWindowStart = validationWindowEnd - foldWindowMs;
-      const trainingWindowStart = validationWindowStart - trainWindowMs;
-      const validationSamples = samples.filter((sample) => sample.decisionTime > validationWindowStart && sample.decisionTime <= validationWindowEnd);
-      const trainingSamples = samples.filter((sample) => {
-        const isInsideTrainingWindow = sample.decisionTime > trainingWindowStart && sample.decisionTime <= validationWindowStart - this.embargoMs;
-        const overlapsValidationWindow =
-          this.buildSpanEnd(sample.decisionTime) >= validationWindowStart && this.buildTrendSpanStart(sample) <= validationWindowEnd + this.embargoMs;
-        return isInsideTrainingWindow && !overlapsValidationWindow;
-      });
-
-      if (trainingSamples.length > 0 && validationSamples.length > 0) {
-        folds.unshift({
-          trainingSamples,
-          validationSamples,
-          validationWindowEnd: new Date(validationWindowEnd).toISOString(),
-          validationWindowStart: new Date(validationWindowStart).toISOString(),
-        });
-      }
-
-      validationWindowEnd = validationWindowStart - this.predictionHorizonMs;
+    if (trainingSamples.length > 0 && validationSamples.length > 0) {
+      trainingSplit = {
+        trainingSamples,
+        validationSamples,
+        validationWindowEnd: new Date(validationSamples.at(-1)?.decisionTime || 0).toISOString(),
+        validationWindowStart: new Date(validationSamples[0]?.decisionTime || 0).toISOString(),
+      };
     }
 
-    return folds;
-  }
-
-  private buildClobFolds(samples: ModelClobSample[]): ModelClobWalkForwardFold[] {
-    const foldWindowMs = this.validationWindowDays * 24 * 60 * 60 * 1_000;
-    const trainWindowMs = this.trainWindowDays * 24 * 60 * 60 * 1_000;
-    const latestDecisionTime = samples.at(-1)?.decisionTime || 0;
-    let validationWindowEnd = latestDecisionTime;
-    const folds: ModelClobWalkForwardFold[] = [];
-
-    while (validationWindowEnd > 0) {
-      const validationWindowStart = validationWindowEnd - foldWindowMs;
-      const trainingWindowStart = validationWindowStart - trainWindowMs;
-      const validationSamples = samples.filter((sample) => sample.decisionTime > validationWindowStart && sample.decisionTime <= validationWindowEnd);
-      const trainingSamples = samples.filter((sample) => {
-        const isInsideTrainingWindow = sample.decisionTime > trainingWindowStart && sample.decisionTime <= validationWindowStart - this.embargoMs;
-        const overlapsValidationWindow =
-          this.buildSpanEnd(sample.decisionTime) >= validationWindowStart && this.buildClobSpanStart(sample) <= validationWindowEnd + this.embargoMs;
-        return isInsideTrainingWindow && !overlapsValidationWindow;
-      });
-
-      if (trainingSamples.length > 0 && validationSamples.length > 0) {
-        folds.unshift({
-          trainingSamples,
-          validationSamples,
-          validationWindowEnd: new Date(validationWindowEnd).toISOString(),
-          validationWindowStart: new Date(validationWindowStart).toISOString(),
-        });
-      }
-
-      validationWindowEnd = validationWindowStart - this.predictionHorizonMs;
-    }
-
-    return folds;
+    return trainingSplit;
   }
 
   private readTrendArchitecture(trendKey: ModelTrendKey, samples: ModelTrendSample[]): ModelTensorflowArchitecture {
@@ -318,7 +231,6 @@ export class ModelTrainingService {
 
   private buildTrendMetadata(
     trendKey: ModelTrendKey,
-    modelId: string,
     architecture: ModelTensorflowArchitecture,
     trainedAt: string,
     featureMedians: number[],
@@ -352,7 +264,6 @@ export class ModelTrainingService {
       trainingSampleCount,
       validationSampleCount,
     };
-    void modelId;
     return trendMetadata;
   }
 
@@ -516,7 +427,7 @@ export class ModelTrainingService {
     const validSamples = samples
       .filter((sample) => sample.trendTarget !== null)
       .sort((leftSample, rightSample) => leftSample.decisionTime - rightSample.decisionTime);
-    const latestFold = this.buildTrendFolds(validSamples).at(-1) || null;
+    const latestFold = this.buildTrainingSplit(validSamples);
     let trainResult: ModelTrendTrainResult = {
       artifact: null,
       trainingSampleCount: 0,
@@ -577,7 +488,6 @@ export class ModelTrainingService {
       );
       const metadata = this.buildTrendMetadata(
         trendKey,
-        modelId,
         architecture,
         trainingJobResult.trainedAt,
         featureMedians,
@@ -607,7 +517,7 @@ export class ModelTrainingService {
     const validSamples = samples
       .filter((sample) => sample.clobTarget !== null && sample.clobDirectionTarget !== null)
       .sort((leftSample, rightSample) => leftSample.decisionTime - rightSample.decisionTime);
-    const latestFold = this.buildClobFolds(validSamples).at(-1) || null;
+    const latestFold = this.buildTrainingSplit(validSamples);
     let trainResult: ModelClobTrainResult = {
       artifact: null,
       trainingSampleCount: 0,

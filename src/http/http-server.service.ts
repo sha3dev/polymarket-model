@@ -117,20 +117,15 @@ export class HttpServerService {
   }
 
   private handleRootRequest(context: Context): Response {
-    const payload = this.appInfoService.buildPayload();
-    const response = this.respondJson(payload, context, 200);
-    return response;
+    return this.respondJson(this.appInfoService.buildPayload(), context, 200);
   }
 
   private handleModelsRequest(context: Context): Response {
-    const payload = this.modelRuntimeService.getStatusPayload();
-    const response = this.respondJson(payload, context, 200);
-    return response;
+    return this.respondJson(this.modelRuntimeService.getStatusPayload(), context, 200);
   }
 
   private handleDashboardRequest(context: Context): Response {
-    const response = this.respondHtml(this.dashboardService.buildHtml(), context, 200);
-    return response;
+    return this.respondHtml(this.dashboardService.buildHtml(), context, 200);
   }
 
   private handleModelRequest(context: Context): Response {
