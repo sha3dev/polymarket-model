@@ -3,9 +3,7 @@ import type {
   ModelClobSample,
   ModelDirectionClass,
   ModelDirectionProbability,
-  ModelHeadArtifact,
   ModelHeadMetrics,
-  ModelTensorflowArchitecture,
   ModelTrendArtifact,
   ModelTrendSample,
 } from "./model.types.ts";
@@ -45,42 +43,6 @@ export type ModelClobTrainResult = {
   artifact: ModelClobArtifact | null;
   trainingSampleCount: number;
   validationSampleCount: number;
-};
-
-export type ModelHeadTrainPayload = {
-  architecture: ModelTensorflowArchitecture;
-  featureNames: string[];
-  featurePath: string;
-  trainingSampleCount: number;
-  validationSampleCount: number;
-  lastTrainWindowStart: string | null;
-  lastTrainWindowEnd: string | null;
-  lastValidationWindowStart: string | null;
-  lastValidationWindowEnd: string | null;
-  version: number;
-};
-
-export type ModelPythonHeadArtifact = {
-  artifact: ModelHeadArtifact;
-  trainingSampleCount: number;
-  validationSampleCount: number;
-  lastTrainWindowStart: string | null;
-  lastTrainWindowEnd: string | null;
-  lastValidationWindowStart: string | null;
-  lastValidationWindowEnd: string | null;
-  trainedAt: string;
-};
-
-export type ModelTrendPythonTrainResult = {
-  artifact: ModelPythonHeadArtifact;
-};
-
-export type ModelClobPythonTrainResult = {
-  artifact: ModelPythonHeadArtifact;
-};
-
-export type ModelPythonPredictionResult = {
-  prediction: ModelHeadPrediction;
 };
 
 export type ModelHeadMetricsPair = {

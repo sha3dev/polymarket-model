@@ -3,7 +3,10 @@
  */
 
 import config from "../config.ts";
-import { PythonClientService } from "../python/python-client.service.ts";
+import logger from "../logger.ts";
+import type { TensorflowApiDecodedPrediction, TensorflowApiHeadMetadata, TensorflowApiModelRecord } from "../tensorflow-api/tensorflow-api.types.ts";
+import { TensorflowApiClientService } from "../tensorflow-api/tensorflow-api-client.service.ts";
+import { TensorflowApiModelDefinitionService } from "../tensorflow-api/tensorflow-api-model-definition.service.ts";
 import type {
   ModelClobArtifact,
   ModelClobInput,
@@ -16,7 +19,7 @@ import type {
   ModelTrendKey,
   ModelTrendSample,
 } from "./model.types.ts";
-import type { ModelPersistenceService } from "./model-persistence.service.ts";
+import { ModelPreprocessingService } from "./model-preprocessing.service.ts";
 import type {
   ModelClobTrainResult,
   ModelClobWalkForwardFold,
@@ -55,9 +58,12 @@ type ModelTrainingServiceOptions = {
   embargoMs: number;
   featureNames: ModelFeatureNames;
   minSampleCount: number;
-  modelPersistenceService: ModelPersistenceService;
+  modelPreprocessingService: ModelPreprocessingService;
   predictionHorizonMs: number;
-  pythonClientService: PythonClientService;
+  tensorflowApiClientService: TensorflowApiClientService;
+  tensorflowApiModelDefinitionService: TensorflowApiModelDefinitionService;
+  trainPollIntervalMs: number;
+  trainTimeoutMs: number;
   trainWindowDays: number;
   validationWindowDays: number;
 };
@@ -77,11 +83,17 @@ export class ModelTrainingService {
 
   private readonly minSampleCount: number;
 
-  private readonly modelPersistenceService: ModelPersistenceService;
+  private readonly modelPreprocessingService: ModelPreprocessingService;
 
   private readonly predictionHorizonMs: number;
 
-  private readonly pythonClientService: PythonClientService;
+  private readonly tensorflowApiClientService: TensorflowApiClientService;
+
+  private readonly tensorflowApiModelDefinitionService: TensorflowApiModelDefinitionService;
+
+  private readonly trainPollIntervalMs: number;
+
+  private readonly trainTimeoutMs: number;
 
   private readonly trainWindowDays: number;
 
@@ -95,9 +107,12 @@ export class ModelTrainingService {
     this.embargoMs = options.embargoMs;
     this.featureNames = options.featureNames;
     this.minSampleCount = options.minSampleCount;
-    this.modelPersistenceService = options.modelPersistenceService;
+    this.modelPreprocessingService = options.modelPreprocessingService;
     this.predictionHorizonMs = options.predictionHorizonMs;
-    this.pythonClientService = options.pythonClientService;
+    this.tensorflowApiClientService = options.tensorflowApiClientService;
+    this.tensorflowApiModelDefinitionService = options.tensorflowApiModelDefinitionService;
+    this.trainPollIntervalMs = options.trainPollIntervalMs;
+    this.trainTimeoutMs = options.trainTimeoutMs;
     this.trainWindowDays = options.trainWindowDays;
     this.validationWindowDays = options.validationWindowDays;
   }
@@ -106,14 +121,17 @@ export class ModelTrainingService {
    * @section factory
    */
 
-  public static createDefault(featureNames: ModelFeatureNames, modelPersistenceService: ModelPersistenceService): ModelTrainingService {
+  public static createDefault(featureNames: ModelFeatureNames): ModelTrainingService {
     const modelTrainingService = new ModelTrainingService({
       embargoMs: config.MODEL_EMBARGO_MS,
       featureNames,
       minSampleCount: config.MODEL_MIN_SAMPLE_COUNT,
-      modelPersistenceService,
+      modelPreprocessingService: ModelPreprocessingService.createDefault(),
       predictionHorizonMs: config.MODEL_PREDICTION_HORIZON_MS,
-      pythonClientService: PythonClientService.createDefault(),
+      tensorflowApiClientService: TensorflowApiClientService.createDefault(),
+      tensorflowApiModelDefinitionService: TensorflowApiModelDefinitionService.createDefault(),
+      trainPollIntervalMs: config.TENSORFLOW_API_TRAIN_POLL_INTERVAL_MS,
+      trainTimeoutMs: config.TENSORFLOW_API_TRAIN_TIMEOUT_MS,
       trainWindowDays: config.MODEL_TRAIN_WINDOW_DAYS,
       validationWindowDays: config.MODEL_VALIDATION_WINDOW_DAYS,
     });
@@ -206,9 +224,8 @@ export class ModelTrainingService {
   }
 
   private readTrendArchitecture(trendKey: ModelTrendKey, samples: ModelTrendSample[]): ModelTensorflowArchitecture {
-    const baseArchitecture = TREND_ARCHITECTURES[trendKey];
     const trendArchitecture: ModelTensorflowArchitecture = {
-      ...baseArchitecture,
+      ...TREND_ARCHITECTURES[trendKey],
       featureCount: this.featureNames.trendFeatures.length,
       sequenceLength: samples[0]?.trendSequence.length || 0,
     };
@@ -216,59 +233,290 @@ export class ModelTrainingService {
   }
 
   private readClobArchitecture(modelKey: ModelClobKey, samples: ModelClobSample[]): ModelTensorflowArchitecture {
-    const baseArchitecture = CLOB_ARCHITECTURES[modelKey];
     const clobArchitecture: ModelTensorflowArchitecture = {
-      ...baseArchitecture,
+      ...CLOB_ARCHITECTURES[modelKey],
       featureCount: this.featureNames.clobFeatures.length,
       sequenceLength: samples[0]?.clobSequence.length || 0,
     };
     return clobArchitecture;
   }
 
+  private buildTrendModelId(trendKey: ModelTrendKey): string {
+    const modelId = `polymarket-model.trend.${trendKey}`;
+    return modelId;
+  }
+
+  private buildClobModelId(modelKey: ModelClobKey): string {
+    const modelId = `polymarket-model.clob.${modelKey}`;
+    return modelId;
+  }
+
+  private async sleep(delayMs: number): Promise<void> {
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, delayMs);
+    });
+  }
+
+  private async ensureRemoteModelExists(modelId: string, architecture: ModelTensorflowArchitecture): Promise<void> {
+    try {
+      await this.tensorflowApiClientService.readModel(modelId);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : "unknown tensorflow-api error";
+      logger.warn(`tensorflow-api readModel failed modelId=${modelId} error=${errorMessage}`);
+
+      if (!errorMessage.includes("status=404")) {
+        throw error;
+      }
+
+      logger.info(`creating remote tensorflow-api model modelId=${modelId}`);
+      await this.tensorflowApiClientService.createModel(this.tensorflowApiModelDefinitionService.buildCreateModelRequest(modelId, architecture));
+    }
+  }
+
+  private async waitForTrainingCompletion(jobId: string): Promise<void> {
+    const startedAt = Date.now();
+    let shouldContinuePolling = true;
+
+    while (shouldContinuePolling) {
+      const jobRecord = await this.tensorflowApiClientService.readJob(jobId);
+
+      if (jobRecord.status === "failed") {
+        throw new Error(`tensorflow-api training job failed model=${jobRecord.modelId} jobId=${jobId} error=${jobRecord.errorMessage || "unknown error"}`);
+      }
+
+      if (jobRecord.status === "succeeded") {
+        shouldContinuePolling = false;
+      }
+
+      if (shouldContinuePolling && Date.now() - startedAt >= this.trainTimeoutMs) {
+        throw new Error(`tensorflow-api training job timed out jobId=${jobId} timeoutMs=${this.trainTimeoutMs}`);
+      }
+
+      if (shouldContinuePolling) {
+        await this.sleep(this.trainPollIntervalMs);
+      }
+    }
+  }
+
+  private readPredictionOutputValue(outputRows: number[][] | undefined): number {
+    const outputValue = outputRows?.[0]?.[0] || 0;
+    return outputValue;
+  }
+
+  private readPredictionOutputVector(outputRows: number[][] | undefined): number[] {
+    const outputVector = outputRows?.[0] || [0, 0, 0];
+    return outputVector;
+  }
+
+  private decodePrediction(outputValue: number, outputVector: number[], targetEncoding: "identity" | "logit_probability"): TensorflowApiDecodedPrediction {
+    const decodedPrediction: TensorflowApiDecodedPrediction = {
+      predictedValue: this.modelPreprocessingService.decodeRegressionValue(outputValue, targetEncoding),
+      probabilities: this.modelPreprocessingService.buildProbabilities(outputVector),
+    };
+    return decodedPrediction;
+  }
+
+  private buildTrendMetadata(
+    trendKey: ModelTrendKey,
+    modelId: string,
+    architecture: ModelTensorflowArchitecture,
+    trainedAt: string,
+    featureMedians: number[],
+    featureScales: number[],
+    classWeights: [number, number, number],
+    directionThreshold: number,
+    trainingSampleCount: number,
+    validationSampleCount: number,
+    lastTrainWindowStart: string | null,
+    lastTrainWindowEnd: string | null,
+    lastValidationWindowStart: string | null,
+    lastValidationWindowEnd: string | null,
+    metrics: ModelTrendArtifact["model"]["metrics"],
+  ): TensorflowApiHeadMetadata {
+    const trendMetadata: TensorflowApiHeadMetadata = {
+      architecture,
+      classWeights,
+      directionThreshold,
+      featureMedians,
+      featureNames: this.featureNames.trendFeatures,
+      featureScales,
+      lastTrainWindowEnd,
+      lastTrainWindowStart,
+      lastValidationWindowEnd,
+      lastValidationWindowStart,
+      logicalKey: trendKey,
+      logicalModelType: "trend",
+      metrics,
+      targetEncoding: "identity",
+      trainedAt,
+      trainingSampleCount,
+      validationSampleCount,
+    };
+    void modelId;
+    return trendMetadata;
+  }
+
+  private buildClobMetadata(
+    modelKey: ModelClobKey,
+    architecture: ModelTensorflowArchitecture,
+    trainedAt: string,
+    featureMedians: number[],
+    featureScales: number[],
+    classWeights: [number, number, number],
+    directionThreshold: number,
+    trainingSampleCount: number,
+    validationSampleCount: number,
+    lastTrainWindowStart: string | null,
+    lastTrainWindowEnd: string | null,
+    lastValidationWindowStart: string | null,
+    lastValidationWindowEnd: string | null,
+    metrics: ModelClobArtifact["model"]["metrics"],
+  ): TensorflowApiHeadMetadata {
+    const clobMetadata: TensorflowApiHeadMetadata = {
+      architecture,
+      classWeights,
+      directionThreshold,
+      featureMedians,
+      featureNames: this.featureNames.clobFeatures,
+      featureScales,
+      lastTrainWindowEnd,
+      lastTrainWindowStart,
+      lastValidationWindowEnd,
+      lastValidationWindowStart,
+      logicalKey: modelKey,
+      logicalModelType: "clob",
+      metrics,
+      targetEncoding: "logit_probability",
+      trainedAt,
+      trainingSampleCount,
+      validationSampleCount,
+    };
+    return clobMetadata;
+  }
+
+  private buildTrendArtifact(remoteModelRecord: TensorflowApiModelRecord, metadata: TensorflowApiHeadMetadata): ModelTrendArtifact {
+    const trendArtifact: ModelTrendArtifact = {
+      lastTrainWindowEnd: metadata.lastTrainWindowEnd,
+      lastTrainWindowStart: metadata.lastTrainWindowStart,
+      lastValidationWindowEnd: metadata.lastValidationWindowEnd,
+      lastValidationWindowStart: metadata.lastValidationWindowStart,
+      model: {
+        architecture: metadata.architecture,
+        classWeights: metadata.classWeights,
+        directionThreshold: metadata.directionThreshold,
+        featureMedians: metadata.featureMedians,
+        featureNames: metadata.featureNames,
+        featureScales: metadata.featureScales,
+        metrics: metadata.metrics,
+        remoteModelId: remoteModelRecord.modelId,
+        targetEncoding: metadata.targetEncoding,
+      },
+      remoteModelId: remoteModelRecord.modelId,
+      trainedAt: metadata.trainedAt,
+      trainingSampleCount: metadata.trainingSampleCount,
+      trendKey: metadata.logicalKey as ModelTrendKey,
+      validationSampleCount: metadata.validationSampleCount,
+      version: remoteModelRecord.trainingCount,
+    };
+    return trendArtifact;
+  }
+
+  private buildClobArtifact(remoteModelRecord: TensorflowApiModelRecord, metadata: TensorflowApiHeadMetadata): ModelClobArtifact {
+    const [asset, window] = metadata.logicalKey.split("_") as [ModelTrendKey, "5m" | "15m"];
+    const clobArtifact: ModelClobArtifact = {
+      asset,
+      lastTrainWindowEnd: metadata.lastTrainWindowEnd,
+      lastTrainWindowStart: metadata.lastTrainWindowStart,
+      lastValidationWindowEnd: metadata.lastValidationWindowEnd,
+      lastValidationWindowStart: metadata.lastValidationWindowStart,
+      model: {
+        architecture: metadata.architecture,
+        classWeights: metadata.classWeights,
+        directionThreshold: metadata.directionThreshold,
+        featureMedians: metadata.featureMedians,
+        featureNames: metadata.featureNames,
+        featureScales: metadata.featureScales,
+        metrics: metadata.metrics,
+        remoteModelId: remoteModelRecord.modelId,
+        targetEncoding: metadata.targetEncoding,
+      },
+      modelKey: metadata.logicalKey as ModelClobKey,
+      remoteModelId: remoteModelRecord.modelId,
+      trainedAt: metadata.trainedAt,
+      trainingSampleCount: metadata.trainingSampleCount,
+      validationSampleCount: metadata.validationSampleCount,
+      version: remoteModelRecord.trainingCount,
+      window,
+    };
+    return clobArtifact;
+  }
+
+  private async buildValidationPredictions(
+    modelId: string,
+    scaledValidationSequences: number[][][],
+    targetEncoding: "identity" | "logit_probability",
+  ): Promise<TensorflowApiDecodedPrediction[]> {
+    const predictionResponse = await this.tensorflowApiClientService.predict(modelId, {
+      predictionInput: {
+        inputs: scaledValidationSequences,
+      },
+    });
+    const regressionOutputs = predictionResponse.outputs.regression || [];
+    const classificationOutputs = predictionResponse.outputs.classification || [];
+    const validationPredictions = scaledValidationSequences.map((_sequence, sequenceIndex) =>
+      this.decodePrediction(regressionOutputs[sequenceIndex]?.[0] || 0, classificationOutputs[sequenceIndex] || [0, 0, 0], targetEncoding),
+    );
+    return validationPredictions;
+  }
+
   /**
    * @section public:methods
    */
 
-  public async ensurePythonRuntime(): Promise<void> {
-    await this.pythonClientService.ensureStarted();
+  public async ensureTensorflowApi(): Promise<void> {
+    await this.tensorflowApiClientService.ensureReachable();
   }
 
-  public async stop(): Promise<void> {
-    await this.pythonClientService.stop();
-  }
-
-  public async loadTrend(artifact: ModelTrendArtifact): Promise<void> {
-    await this.pythonClientService.loadTrend(artifact);
-  }
-
-  public async loadClob(artifact: ModelClobArtifact): Promise<void> {
-    await this.pythonClientService.loadClob(artifact);
-  }
-
-  public async unloadTrend(trendKey: string): Promise<void> {
-    await this.pythonClientService.unloadTrend(trendKey);
-  }
-
-  public async unloadClob(modelKey: string): Promise<void> {
-    await this.pythonClientService.unloadClob(modelKey);
+  public async readRemoteModels(): Promise<TensorflowApiModelRecord[]> {
+    const remoteModelRecords = await this.tensorflowApiClientService.readModels();
+    return remoteModelRecords;
   }
 
   public async predictTrend(artifact: ModelTrendArtifact, input: ModelTrendInput): Promise<ModelHeadPrediction> {
-    const predictionResult = await this.pythonClientService.predictTrend(artifact.trendKey, artifact.model, input);
-    return predictionResult.prediction;
+    const scaledInput = this.modelPreprocessingService.scaleSequences([input.trendSequence], artifact.model.featureMedians, artifact.model.featureScales);
+    const predictionResponse = await this.tensorflowApiClientService.predict(artifact.remoteModelId, {
+      predictionInput: {
+        inputs: scaledInput,
+      },
+    });
+    const prediction = this.decodePrediction(
+      this.readPredictionOutputValue(predictionResponse.outputs.regression),
+      this.readPredictionOutputVector(predictionResponse.outputs.classification),
+      artifact.model.targetEncoding,
+    );
+    return prediction;
   }
 
   public async predictClob(artifact: ModelClobArtifact, input: ModelClobInput): Promise<ModelHeadPrediction> {
-    const predictionResult = await this.pythonClientService.predictClob(artifact.modelKey, artifact.model, input);
-    return predictionResult.prediction;
+    const scaledInput = this.modelPreprocessingService.scaleSequences([input.clobSequence], artifact.model.featureMedians, artifact.model.featureScales);
+    const predictionResponse = await this.tensorflowApiClientService.predict(artifact.remoteModelId, {
+      predictionInput: {
+        inputs: scaledInput,
+      },
+    });
+    const prediction = this.decodePrediction(
+      this.readPredictionOutputValue(predictionResponse.outputs.regression),
+      this.readPredictionOutputVector(predictionResponse.outputs.classification),
+      artifact.model.targetEncoding,
+    );
+    return prediction;
   }
 
-  public async trainTrend(trendKey: ModelTrendKey, samples: ModelTrendSample[], previousVersion: number): Promise<ModelTrendTrainResult> {
+  public async trainTrend(trendKey: ModelTrendKey, samples: ModelTrendSample[]): Promise<ModelTrendTrainResult> {
     const validSamples = samples
       .filter((sample) => sample.trendTarget !== null)
       .sort((leftSample, rightSample) => leftSample.decisionTime - rightSample.decisionTime);
-    const folds = this.buildTrendFolds(validSamples);
-    const latestFold = folds.at(-1) || null;
+    const latestFold = this.buildTrendFolds(validSamples).at(-1) || null;
     let trainResult: ModelTrendTrainResult = {
       artifact: null,
       trainingSampleCount: 0,
@@ -276,34 +524,77 @@ export class ModelTrainingService {
     };
 
     if (latestFold !== null && latestFold.trainingSamples.length >= this.minSampleCount && latestFold.validationSamples.length > 0) {
-      const nextVersion = previousVersion + 1;
-      const artifactPathPair = this.modelPersistenceService.buildTrendArtifactPaths(trendKey, nextVersion);
-      const pythonTrainResult = await this.pythonClientService.trainTrend({
-        architecture: this.readTrendArchitecture(trendKey, latestFold.trainingSamples),
-        artifactDirectoryPath: artifactPathPair.absoluteDirectoryPath,
-        featureNames: this.featureNames.trendFeatures,
-        targetEncoding: "identity",
-        trainingSamples: latestFold.trainingSamples,
-        validationSamples: latestFold.validationSamples,
-        version: nextVersion,
-      });
-      const trendArtifact: ModelTrendArtifact = this.modelPersistenceService.withRelativeTrendArtifactPath(
-        {
-          trendKey,
-          version: nextVersion,
-          trainedAt: pythonTrainResult.artifact.trainedAt,
-          trainingSampleCount: latestFold.trainingSamples.length,
-          validationSampleCount: latestFold.validationSamples.length,
-          lastTrainWindowStart: new Date(latestFold.trainingSamples[0]?.decisionTime || 0).toISOString(),
-          lastTrainWindowEnd: new Date(latestFold.trainingSamples.at(-1)?.decisionTime || 0).toISOString(),
-          lastValidationWindowStart: latestFold.validationWindowStart,
-          lastValidationWindowEnd: latestFold.validationWindowEnd,
-          model: pythonTrainResult.artifact.artifact,
+      const architecture = this.readTrendArchitecture(trendKey, latestFold.trainingSamples);
+      const modelId = this.buildTrendModelId(trendKey);
+      const trainingSequences = this.modelPreprocessingService.buildTrendSequences(latestFold.trainingSamples);
+      const validationSequences = this.modelPreprocessingService.buildTrendSequences(latestFold.validationSamples);
+      const featureMedians = this.modelPreprocessingService.buildFeatureMedians(trainingSequences);
+      const featureScales = this.modelPreprocessingService.buildFeatureScales(trainingSequences, featureMedians);
+      const scaledTrainingSequences = this.modelPreprocessingService.scaleSequences(trainingSequences, featureMedians, featureScales);
+      const scaledValidationSequences = this.modelPreprocessingService.scaleSequences(validationSequences, featureMedians, featureScales);
+      const trendTargets = latestFold.trainingSamples.map((sample) => sample.trendTarget || 0);
+      const validationTrendTargets = latestFold.validationSamples.map((sample) => sample.trendTarget || 0);
+      const labeling = this.modelPreprocessingService.buildDirectionLabeling(trendTargets, 0.0001);
+      const validationLabeling = this.modelPreprocessingService.buildDirectionLabeling(validationTrendTargets, 0.0001);
+
+      await this.ensureRemoteModelExists(modelId, architecture);
+      const trainingJob = await this.tensorflowApiClientService.queueTrainingJob(modelId, {
+        fitConfig: {
+          batchSize: config.MODEL_TF_BATCH_SIZE,
+          epochs: config.MODEL_TF_EPOCHS,
+          shuffle: true,
         },
-        artifactPathPair.relativeDirectoryPath,
+        trainingInput: {
+          inputs: scaledTrainingSequences,
+          sampleWeights: {
+            classification: labeling.sampleWeights,
+            regression: trendTargets.map(() => 1),
+          },
+          targets: {
+            classification: this.modelPreprocessingService.buildOneHotTargets(labeling.labels),
+            regression: this.modelPreprocessingService.buildRegressionTargets(trendTargets),
+          },
+          validationInputs: scaledValidationSequences,
+          validationSampleWeights: {
+            classification: validationTrendTargets.map(() => 1),
+            regression: validationTrendTargets.map(() => 1),
+          },
+          validationTargets: {
+            classification: this.modelPreprocessingService.buildOneHotTargets(validationLabeling.labels),
+            regression: this.modelPreprocessingService.buildRegressionTargets(validationTrendTargets),
+          },
+        },
+      });
+
+      await this.waitForTrainingCompletion(trainingJob.jobId);
+      const trainingJobResult = await this.tensorflowApiClientService.readJobResult(trainingJob.jobId);
+      const validationPredictions = await this.buildValidationPredictions(modelId, scaledValidationSequences, "identity");
+      const metrics = this.modelPreprocessingService.buildHeadMetrics(
+        validationPredictions,
+        validationTrendTargets,
+        validationLabeling.labels,
+        labeling.threshold,
       );
+      const metadata = this.buildTrendMetadata(
+        trendKey,
+        modelId,
+        architecture,
+        trainingJobResult.trainedAt,
+        featureMedians,
+        featureScales,
+        labeling.classWeights,
+        labeling.threshold,
+        latestFold.trainingSamples.length,
+        latestFold.validationSamples.length,
+        new Date(latestFold.trainingSamples[0]?.decisionTime || 0).toISOString(),
+        new Date(latestFold.trainingSamples.at(-1)?.decisionTime || 0).toISOString(),
+        latestFold.validationWindowStart,
+        latestFold.validationWindowEnd,
+        metrics,
+      );
+      const remoteModelRecord = await this.tensorflowApiClientService.updateModelMetadata(modelId, { metadata });
       trainResult = {
-        artifact: trendArtifact,
+        artifact: this.buildTrendArtifact(remoteModelRecord, metadata),
         trainingSampleCount: latestFold.trainingSamples.length,
         validationSampleCount: latestFold.validationSamples.length,
       };
@@ -312,7 +603,7 @@ export class ModelTrainingService {
     return trainResult;
   }
 
-  public async trainClob(modelKey: ModelClobKey, samples: ModelClobSample[], previousVersion: number): Promise<ModelClobTrainResult> {
+  public async trainClob(modelKey: ModelClobKey, samples: ModelClobSample[]): Promise<ModelClobTrainResult> {
     const validSamples = samples
       .filter((sample) => sample.clobTarget !== null && sample.clobDirectionTarget !== null)
       .sort((leftSample, rightSample) => leftSample.decisionTime - rightSample.decisionTime);
@@ -324,37 +615,79 @@ export class ModelTrainingService {
     };
 
     if (latestFold !== null && latestFold.trainingSamples.length >= this.minSampleCount && latestFold.validationSamples.length > 0) {
-      const nextVersion = previousVersion + 1;
-      const artifactPathPair = this.modelPersistenceService.buildClobArtifactPaths(modelKey, nextVersion);
-      const pythonTrainResult = await this.pythonClientService.trainClob({
-        architecture: this.readClobArchitecture(modelKey, latestFold.trainingSamples),
-        artifactDirectoryPath: artifactPathPair.absoluteDirectoryPath,
-        featureNames: this.featureNames.clobFeatures,
-        targetEncoding: "logit_probability",
-        trainingSamples: latestFold.trainingSamples,
-        validationSamples: latestFold.validationSamples,
-        version: nextVersion,
-      });
-      const [asset, window] = modelKey.split("_") as [ModelTrendKey, "5m" | "15m"];
-      const clobArtifact: ModelClobArtifact = this.modelPersistenceService.withRelativeClobArtifactPath(
-        {
-          modelKey,
-          asset,
-          window,
-          version: nextVersion,
-          trainedAt: pythonTrainResult.artifact.trainedAt,
-          trainingSampleCount: latestFold.trainingSamples.length,
-          validationSampleCount: latestFold.validationSamples.length,
-          lastTrainWindowStart: new Date(latestFold.trainingSamples[0]?.decisionTime || 0).toISOString(),
-          lastTrainWindowEnd: new Date(latestFold.trainingSamples.at(-1)?.decisionTime || 0).toISOString(),
-          lastValidationWindowStart: latestFold.validationWindowStart,
-          lastValidationWindowEnd: latestFold.validationWindowEnd,
-          model: pythonTrainResult.artifact.artifact,
+      const architecture = this.readClobArchitecture(modelKey, latestFold.trainingSamples);
+      const modelId = this.buildClobModelId(modelKey);
+      const trainingSequences = this.modelPreprocessingService.buildClobSequences(latestFold.trainingSamples);
+      const validationSequences = this.modelPreprocessingService.buildClobSequences(latestFold.validationSamples);
+      const featureMedians = this.modelPreprocessingService.buildFeatureMedians(trainingSequences);
+      const featureScales = this.modelPreprocessingService.buildFeatureScales(trainingSequences, featureMedians);
+      const scaledTrainingSequences = this.modelPreprocessingService.scaleSequences(trainingSequences, featureMedians, featureScales);
+      const scaledValidationSequences = this.modelPreprocessingService.scaleSequences(validationSequences, featureMedians, featureScales);
+      const clobTargets = latestFold.trainingSamples.map((sample) => sample.clobTarget || 0);
+      const validationClobTargets = latestFold.validationSamples.map((sample) => sample.clobTarget || 0);
+      const directionTargets = latestFold.trainingSamples.map((sample) => sample.clobDirectionTarget || 0);
+      const validationDirectionTargets = latestFold.validationSamples.map((sample) => sample.clobDirectionTarget || 0);
+      const labeling = this.modelPreprocessingService.buildDirectionLabeling(directionTargets, 0.0025);
+      const validationLabeling = this.modelPreprocessingService.buildDirectionLabeling(validationDirectionTargets, 0.0025);
+
+      await this.ensureRemoteModelExists(modelId, architecture);
+      const trainingJob = await this.tensorflowApiClientService.queueTrainingJob(modelId, {
+        fitConfig: {
+          batchSize: config.MODEL_TF_BATCH_SIZE,
+          epochs: config.MODEL_TF_EPOCHS,
+          shuffle: true,
         },
-        artifactPathPair.relativeDirectoryPath,
+        trainingInput: {
+          inputs: scaledTrainingSequences,
+          sampleWeights: {
+            classification: labeling.sampleWeights,
+            regression: clobTargets.map(() => 1),
+          },
+          targets: {
+            classification: this.modelPreprocessingService.buildOneHotTargets(labeling.labels),
+            regression: this.modelPreprocessingService.buildRegressionTargets(clobTargets),
+          },
+          validationInputs: scaledValidationSequences,
+          validationSampleWeights: {
+            classification: validationDirectionTargets.map(() => 1),
+            regression: validationDirectionTargets.map(() => 1),
+          },
+          validationTargets: {
+            classification: this.modelPreprocessingService.buildOneHotTargets(validationLabeling.labels),
+            regression: this.modelPreprocessingService.buildRegressionTargets(validationClobTargets),
+          },
+        },
+      });
+
+      await this.waitForTrainingCompletion(trainingJob.jobId);
+      const trainingJobResult = await this.tensorflowApiClientService.readJobResult(trainingJob.jobId);
+      const validationPredictions = await this.buildValidationPredictions(modelId, scaledValidationSequences, "logit_probability");
+      const decodedValidationTargets = validationClobTargets.map((target) => this.modelPreprocessingService.decodeRegressionValue(target, "logit_probability"));
+      const metrics = this.modelPreprocessingService.buildHeadMetrics(
+        validationPredictions,
+        decodedValidationTargets,
+        validationLabeling.labels,
+        labeling.threshold,
       );
+      const metadata = this.buildClobMetadata(
+        modelKey,
+        architecture,
+        trainingJobResult.trainedAt,
+        featureMedians,
+        featureScales,
+        labeling.classWeights,
+        labeling.threshold,
+        latestFold.trainingSamples.length,
+        latestFold.validationSamples.length,
+        new Date(latestFold.trainingSamples[0]?.decisionTime || 0).toISOString(),
+        new Date(latestFold.trainingSamples.at(-1)?.decisionTime || 0).toISOString(),
+        latestFold.validationWindowStart,
+        latestFold.validationWindowEnd,
+        metrics,
+      );
+      const remoteModelRecord = await this.tensorflowApiClientService.updateModelMetadata(modelId, { metadata });
       trainResult = {
-        artifact: clobArtifact,
+        artifact: this.buildClobArtifact(remoteModelRecord, metadata),
         trainingSampleCount: latestFold.trainingSamples.length,
         validationSampleCount: latestFold.validationSamples.length,
       };

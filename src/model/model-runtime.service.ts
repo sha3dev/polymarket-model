@@ -6,6 +6,7 @@ import { CollectorClientService } from "../collector/collector-client.service.ts
 import config from "../config.ts";
 import logger from "../logger.ts";
 import { SnapshotStoreService } from "../snapshot/snapshot-store.service.ts";
+import type { TensorflowApiHeadMetadata, TensorflowApiModelRecord } from "../tensorflow-api/tensorflow-api.types.ts";
 import type {
   FlatSnapshot,
   ModelAsset,
@@ -23,7 +24,7 @@ import type {
 } from "./model.types.ts";
 import { ModelCostService } from "./model-cost.service.ts";
 import { ModelFeatureService } from "./model-feature.service.ts";
-import { ModelPersistenceService } from "./model-persistence.service.ts";
+import { ModelRuntimeStateService } from "./model-runtime-state.service.ts";
 import { ModelTrainingService } from "./model-training.service.ts";
 
 /**
@@ -34,7 +35,7 @@ type ModelRuntimeServiceOptions = {
   collectorClientService: CollectorClientService;
   modelCostService: ModelCostService;
   modelFeatureService: ModelFeatureService;
-  modelPersistenceService: ModelPersistenceService;
+  modelRuntimeStateService: ModelRuntimeStateService;
   modelTrainingService: ModelTrainingService;
   shouldLogTrainingProgress: boolean;
   shouldRestoreOnStart: boolean;
@@ -59,7 +60,7 @@ export class ModelRuntimeService {
 
   private readonly modelFeatureService: ModelFeatureService;
 
-  private readonly modelPersistenceService: ModelPersistenceService;
+  private readonly modelRuntimeStateService: ModelRuntimeStateService;
 
   private readonly modelTrainingService: ModelTrainingService;
 
@@ -99,7 +100,7 @@ export class ModelRuntimeService {
     this.collectorClientService = options.collectorClientService;
     this.modelCostService = options.modelCostService;
     this.modelFeatureService = options.modelFeatureService;
-    this.modelPersistenceService = options.modelPersistenceService;
+    this.modelRuntimeStateService = options.modelRuntimeStateService;
     this.modelTrainingService = options.modelTrainingService;
     this.shouldLogTrainingProgress = options.shouldLogTrainingProgress;
     this.shouldRestoreOnStart = options.shouldRestoreOnStart;
@@ -124,13 +125,12 @@ export class ModelRuntimeService {
 
   public static createDefault(): ModelRuntimeService {
     const modelFeatureService = ModelFeatureService.createDefault();
-    const modelPersistenceService = ModelPersistenceService.createDefault();
     const modelRuntimeService = new ModelRuntimeService({
       collectorClientService: CollectorClientService.createDefault(),
       modelCostService: ModelCostService.createDefault(),
       modelFeatureService,
-      modelPersistenceService,
-      modelTrainingService: ModelTrainingService.createDefault(modelFeatureService.buildFeatureNames(), modelPersistenceService),
+      modelRuntimeStateService: ModelRuntimeStateService.createDefault(),
+      modelTrainingService: ModelTrainingService.createDefault(modelFeatureService.buildFeatureNames()),
       shouldLogTrainingProgress: config.MODEL_LOG_TRAINING_PROGRESS,
       shouldRestoreOnStart: config.MODEL_RESTORE_ON_START,
       snapshotStoreService: SnapshotStoreService.createDefault(),
@@ -152,17 +152,17 @@ export class ModelRuntimeService {
 
   private buildBaseMetrics(): ModelMetrics {
     const metrics: ModelMetrics = {
-      trendRegressionMae: null,
-      trendRegressionRmse: null,
-      trendRegressionHuber: null,
-      trendDirectionMacroF1: null,
-      trendDirectionSupport: { up: 0, flat: 0, down: 0 },
+      clobDirectionMacroF1: null,
+      clobDirectionSupport: { down: 0, flat: 0, up: 0 },
+      clobRegressionHuber: null,
       clobRegressionMae: null,
       clobRegressionRmse: null,
-      clobRegressionHuber: null,
-      clobDirectionMacroF1: null,
-      clobDirectionSupport: { up: 0, flat: 0, down: 0 },
       sampleCount: 0,
+      trendDirectionMacroF1: null,
+      trendDirectionSupport: { down: 0, flat: 0, up: 0 },
+      trendRegressionHuber: null,
+      trendRegressionMae: null,
+      trendRegressionRmse: null,
     };
     return metrics;
   }
@@ -176,34 +176,34 @@ export class ModelRuntimeService {
         const trendFeatureCount = this.modelFeatureService.buildFeatureNames().trendFeatures.length;
         const clobFeatureCount = this.modelFeatureService.buildFeatureNames().clobFeatures.length;
         this.statusRegistry.set(modelKey, {
-          modelKey,
+          activeMarket: null,
           asset,
-          window,
-          state: "idle",
-          modelFamily: "tcn",
-          version: 0,
-          persistedVersion: 0,
-          trendModelKey: asset,
-          trendVersion: 0,
-          clobVersion: 0,
-          trendSequenceLength,
-          clobSequenceLength,
-          trendFeatureCount,
           clobFeatureCount,
-          featureCountTrend: trendFeatureCount,
+          clobVersion: 0,
+          clobSequenceLength,
           featureCountClob: clobFeatureCount,
-          lastTrainingStartedAt: null,
-          lastTrainingCompletedAt: null,
-          lastValidationWindowStart: null,
-          lastValidationWindowEnd: null,
+          featureCountTrend: trendFeatureCount,
+          lastError: null,
           lastRestoredAt: null,
-          trainingSampleCount: 0,
-          validationSampleCount: 0,
+          lastTrainingCompletedAt: null,
+          lastTrainingStartedAt: null,
+          lastValidationWindowEnd: null,
+          lastValidationWindowStart: null,
           latestSnapshotAt: null,
           liveSnapshotCount: 0,
-          activeMarket: null,
           metrics: this.buildBaseMetrics(),
-          lastError: null,
+          modelFamily: "tcn",
+          modelKey,
+          persistedVersion: 0,
+          state: "idle",
+          trainingSampleCount: 0,
+          trendFeatureCount,
+          trendModelKey: asset,
+          trendSequenceLength,
+          trendVersion: 0,
+          validationSampleCount: 0,
+          version: 0,
+          window,
         });
       });
     });
@@ -220,9 +220,8 @@ export class ModelRuntimeService {
   }
 
   private updateStatus(modelKey: ModelClobKey, statusPatch: Partial<ModelStatus>): void {
-    const currentStatus = this.getStatus(modelKey);
     this.statusRegistry.set(modelKey, {
-      ...currentStatus,
+      ...this.getStatus(modelKey),
       ...statusPatch,
     });
   }
@@ -231,17 +230,17 @@ export class ModelRuntimeService {
     const trendArtifact = this.trendArtifactRegistry.get(asset) || null;
     const clobArtifact = this.clobArtifactRegistry.get(modelKey) || null;
     const metrics: ModelMetrics = {
-      trendRegressionMae: trendArtifact?.model.metrics.regressionMae || null,
-      trendRegressionRmse: trendArtifact?.model.metrics.regressionRmse || null,
-      trendRegressionHuber: trendArtifact?.model.metrics.regressionHuber || null,
-      trendDirectionMacroF1: trendArtifact?.model.metrics.directionMacroF1 || null,
-      trendDirectionSupport: trendArtifact?.model.metrics.directionSupport || { up: 0, flat: 0, down: 0 },
+      clobDirectionMacroF1: clobArtifact?.model.metrics.directionMacroF1 || null,
+      clobDirectionSupport: clobArtifact?.model.metrics.directionSupport || { down: 0, flat: 0, up: 0 },
+      clobRegressionHuber: clobArtifact?.model.metrics.regressionHuber || null,
       clobRegressionMae: clobArtifact?.model.metrics.regressionMae || null,
       clobRegressionRmse: clobArtifact?.model.metrics.regressionRmse || null,
-      clobRegressionHuber: clobArtifact?.model.metrics.regressionHuber || null,
-      clobDirectionMacroF1: clobArtifact?.model.metrics.directionMacroF1 || null,
-      clobDirectionSupport: clobArtifact?.model.metrics.directionSupport || { up: 0, flat: 0, down: 0 },
       sampleCount: Math.max(trendArtifact?.model.metrics.sampleCount || 0, clobArtifact?.model.metrics.sampleCount || 0),
+      trendDirectionMacroF1: trendArtifact?.model.metrics.directionMacroF1 || null,
+      trendDirectionSupport: trendArtifact?.model.metrics.directionSupport || { down: 0, flat: 0, up: 0 },
+      trendRegressionHuber: trendArtifact?.model.metrics.regressionHuber || null,
+      trendRegressionMae: trendArtifact?.model.metrics.regressionMae || null,
+      trendRegressionRmse: trendArtifact?.model.metrics.regressionRmse || null,
     };
     return metrics;
   }
@@ -251,25 +250,19 @@ export class ModelRuntimeService {
     const trendArtifact = this.trendArtifactRegistry.get(currentStatus.asset) || null;
     const clobArtifact = this.clobArtifactRegistry.get(modelKey) || null;
     const isReady = trendArtifact !== null && clobArtifact !== null;
-    const version = clobArtifact?.version || 0;
-    const lastCompletedAt = clobArtifact?.trainedAt || trendArtifact?.trainedAt || currentStatus.lastTrainingCompletedAt;
-    const validationWindowStart = clobArtifact?.lastValidationWindowStart || trendArtifact?.lastValidationWindowStart || null;
-    const validationWindowEnd = clobArtifact?.lastValidationWindowEnd || trendArtifact?.lastValidationWindowEnd || null;
-    const trainingSampleCount = clobArtifact?.trainingSampleCount || trendArtifact?.trainingSampleCount || 0;
-    const validationSampleCount = clobArtifact?.validationSampleCount || trendArtifact?.validationSampleCount || 0;
     this.updateStatus(modelKey, {
-      state: isReady ? "ready" : currentStatus.state,
-      version,
-      persistedVersion: version,
-      trendVersion: trendArtifact?.version || 0,
       clobVersion: clobArtifact?.version || 0,
-      lastTrainingCompletedAt: lastCompletedAt,
-      lastValidationWindowStart: validationWindowStart,
-      lastValidationWindowEnd: validationWindowEnd,
-      trainingSampleCount,
-      validationSampleCount,
-      metrics: this.buildCompositeMetrics(currentStatus.asset, modelKey),
       lastError: null,
+      lastTrainingCompletedAt: clobArtifact?.trainedAt || trendArtifact?.trainedAt || currentStatus.lastTrainingCompletedAt,
+      lastValidationWindowEnd: clobArtifact?.lastValidationWindowEnd || trendArtifact?.lastValidationWindowEnd || null,
+      lastValidationWindowStart: clobArtifact?.lastValidationWindowStart || trendArtifact?.lastValidationWindowStart || null,
+      metrics: this.buildCompositeMetrics(currentStatus.asset, modelKey),
+      persistedVersion: clobArtifact?.version || 0,
+      state: isReady ? "ready" : currentStatus.state,
+      trainingSampleCount: clobArtifact?.trainingSampleCount || trendArtifact?.trainingSampleCount || 0,
+      trendVersion: trendArtifact?.version || 0,
+      validationSampleCount: clobArtifact?.validationSampleCount || trendArtifact?.validationSampleCount || 0,
+      version: clobArtifact?.version || 0,
     });
   }
 
@@ -322,27 +315,101 @@ export class ModelRuntimeService {
     return mergedSnapshots;
   }
 
-  private async restorePersistedState(): Promise<void> {
-    const manifestSnapshot = this.shouldRestoreOnStart ? await this.modelPersistenceService.loadManifest() : null;
+  private parseHeadMetadata(rawMetadata: Record<string, unknown> | null): TensorflowApiHeadMetadata | null {
+    let headMetadata: TensorflowApiHeadMetadata | null = null;
 
-    if (manifestSnapshot !== null) {
-      this.lastTrainingCycleAt = manifestSnapshot.lastTrainingCycleAt;
-      this.lastTrainedSnapshotAt = manifestSnapshot.lastTrainedSnapshotAt === null ? null : Date.parse(manifestSnapshot.lastTrainedSnapshotAt);
+    if (rawMetadata?.logicalKey && rawMetadata.logicalModelType) {
+      headMetadata = rawMetadata as unknown as TensorflowApiHeadMetadata;
+    }
 
-      for (const trendModel of manifestSnapshot.trendModels) {
-        this.trendArtifactRegistry.set(trendModel.trendKey, trendModel.artifact);
-        await this.modelTrainingService.loadTrend(trendModel.artifact);
-      }
+    return headMetadata;
+  }
 
-      for (const clobModel of manifestSnapshot.clobModels) {
-        this.clobArtifactRegistry.set(clobModel.modelKey, clobModel.artifact);
-        this.statusRegistry.set(clobModel.modelKey, {
-          ...clobModel.status,
-          lastRestoredAt: new Date().toISOString(),
+  private restoreArtifactFromRemoteRecord(modelRecord: TensorflowApiModelRecord): void {
+    const headMetadata = this.parseHeadMetadata(modelRecord.metadata);
+
+    if (modelRecord.status === "ready" && headMetadata !== null) {
+      if (headMetadata.logicalModelType === "trend") {
+        this.trendArtifactRegistry.set(headMetadata.logicalKey as ModelTrendKey, {
+          lastTrainWindowEnd: headMetadata.lastTrainWindowEnd,
+          lastTrainWindowStart: headMetadata.lastTrainWindowStart,
+          lastValidationWindowEnd: headMetadata.lastValidationWindowEnd,
+          lastValidationWindowStart: headMetadata.lastValidationWindowStart,
+          model: {
+            architecture: headMetadata.architecture,
+            classWeights: headMetadata.classWeights,
+            directionThreshold: headMetadata.directionThreshold,
+            featureMedians: headMetadata.featureMedians,
+            featureNames: headMetadata.featureNames,
+            featureScales: headMetadata.featureScales,
+            metrics: headMetadata.metrics,
+            remoteModelId: modelRecord.modelId,
+            targetEncoding: headMetadata.targetEncoding,
+          },
+          remoteModelId: modelRecord.modelId,
+          trainedAt: headMetadata.trainedAt,
+          trainingSampleCount: headMetadata.trainingSampleCount,
+          trendKey: headMetadata.logicalKey as ModelTrendKey,
+          validationSampleCount: headMetadata.validationSampleCount,
+          version: modelRecord.trainingCount,
         });
-        await this.modelTrainingService.loadClob(clobModel.artifact);
       }
 
+      if (headMetadata.logicalModelType === "clob") {
+        const [asset, window] = headMetadata.logicalKey.split("_") as [ModelAsset, ModelWindow];
+        this.clobArtifactRegistry.set(headMetadata.logicalKey as ModelClobKey, {
+          asset,
+          lastTrainWindowEnd: headMetadata.lastTrainWindowEnd,
+          lastTrainWindowStart: headMetadata.lastTrainWindowStart,
+          lastValidationWindowEnd: headMetadata.lastValidationWindowEnd,
+          lastValidationWindowStart: headMetadata.lastValidationWindowStart,
+          model: {
+            architecture: headMetadata.architecture,
+            classWeights: headMetadata.classWeights,
+            directionThreshold: headMetadata.directionThreshold,
+            featureMedians: headMetadata.featureMedians,
+            featureNames: headMetadata.featureNames,
+            featureScales: headMetadata.featureScales,
+            metrics: headMetadata.metrics,
+            remoteModelId: modelRecord.modelId,
+            targetEncoding: headMetadata.targetEncoding,
+          },
+          modelKey: headMetadata.logicalKey as ModelClobKey,
+          remoteModelId: modelRecord.modelId,
+          trainedAt: headMetadata.trainedAt,
+          trainingSampleCount: headMetadata.trainingSampleCount,
+          validationSampleCount: headMetadata.validationSampleCount,
+          version: modelRecord.trainingCount,
+          window,
+        });
+      }
+    }
+  }
+
+  private markRemoteFailure(modelRecord: TensorflowApiModelRecord): void {
+    const headMetadata = this.parseHeadMetadata(modelRecord.metadata);
+
+    if (modelRecord.status === "failed" && headMetadata !== null && headMetadata.logicalModelType === "clob") {
+      this.updateStatus(headMetadata.logicalKey as ModelClobKey, {
+        lastError: `remote model failed modelId=${modelRecord.modelId}`,
+        state: "error",
+      });
+    }
+  }
+
+  private async restorePersistedState(): Promise<void> {
+    const runtimeStateSnapshot = this.shouldRestoreOnStart
+      ? await this.modelRuntimeStateService.loadState()
+      : { lastTrainingCycleAt: null, lastTrainedSnapshotAt: null, schemaVersion: 1 };
+    this.lastTrainingCycleAt = runtimeStateSnapshot.lastTrainingCycleAt;
+    this.lastTrainedSnapshotAt = runtimeStateSnapshot.lastTrainedSnapshotAt === null ? null : Date.parse(runtimeStateSnapshot.lastTrainedSnapshotAt);
+
+    if (this.shouldRestoreOnStart) {
+      const remoteModelRecords = await this.modelTrainingService.readRemoteModels();
+      remoteModelRecords.forEach((modelRecord) => {
+        this.restoreArtifactFromRemoteRecord(modelRecord);
+        this.markRemoteFailure(modelRecord);
+      });
       this.statusRegistry.forEach((_status, modelKey) => {
         this.refreshModelStatus(modelKey);
       });
@@ -353,8 +420,8 @@ export class ModelRuntimeService {
     this.isTrainingCycleRunning = true;
     this.statusRegistry.forEach((status, modelKey) => {
       this.updateStatus(modelKey, {
-        lastTrainingStartedAt: startedAt,
         lastError: null,
+        lastTrainingStartedAt: startedAt,
         state: status.version === 0 ? "training" : status.state,
       });
     });
@@ -373,47 +440,16 @@ export class ModelRuntimeService {
     });
   }
 
-  private async replaceTrendArtifact(asset: ModelTrendKey, artifact: ModelTrendArtifact): Promise<void> {
-    const previousArtifact = this.trendArtifactRegistry.get(asset) || null;
+  private replaceTrendArtifact(asset: ModelTrendKey, artifact: ModelTrendArtifact): void {
     this.trendArtifactRegistry.set(asset, artifact);
-    await this.modelTrainingService.loadTrend(artifact);
-
-    if (previousArtifact !== null) {
-      await this.modelTrainingService.unloadTrend(previousArtifact.trendKey);
-    }
-
     this.supportedWindows.forEach((window) => {
       this.refreshModelStatus(this.buildModelKey(asset, window));
     });
   }
 
-  private async replaceClobArtifact(modelKey: ModelClobKey, artifact: ModelClobArtifact): Promise<void> {
-    const previousArtifact = this.clobArtifactRegistry.get(modelKey) || null;
+  private replaceClobArtifact(modelKey: ModelClobKey, artifact: ModelClobArtifact): void {
     this.clobArtifactRegistry.set(modelKey, artifact);
-    await this.modelTrainingService.loadClob(artifact);
-
-    if (previousArtifact !== null) {
-      await this.modelTrainingService.unloadClob(previousArtifact.modelKey);
-    }
-
     this.refreshModelStatus(modelKey);
-  }
-
-  private buildManifestTrendModels(): Array<{ artifact: ModelTrendArtifact; trendKey: ModelTrendKey }> {
-    const trendModels = [...this.trendArtifactRegistry.entries()].map(([trendKey, artifact]) => ({
-      artifact,
-      trendKey,
-    }));
-    return trendModels;
-  }
-
-  private buildManifestClobModels(): Array<{ artifact: ModelClobArtifact; modelKey: ModelClobKey; status: ModelStatus }> {
-    const clobModels = [...this.clobArtifactRegistry.entries()].map(([modelKey, artifact]) => ({
-      artifact,
-      modelKey,
-      status: this.getStatus(modelKey),
-    }));
-    return clobModels;
   }
 
   private logTrainingBlock(modelKey: string, version: number, trainingSampleCount: number, validationSampleCount: number): void {
@@ -427,9 +463,9 @@ export class ModelRuntimeService {
     const statusPayload: ModelStatusPayload = {
       isTrainingCycleRunning: this.isTrainingCycleRunning,
       lastTrainingCycleAt: this.lastTrainingCycleAt,
-      models,
-      liveSnapshotCount: models.at(0)?.liveSnapshotCount || 0,
       latestSnapshotAt: models.at(0)?.latestSnapshotAt || null,
+      liveSnapshotCount: models.at(0)?.liveSnapshotCount || 0,
+      models,
     };
     return statusPayload;
   }
@@ -441,24 +477,24 @@ export class ModelRuntimeService {
     fusionPayload: ModelPredictionPayload["fusion"],
   ): ModelPredictionPayload {
     const predictionPayload: ModelPredictionPayload = {
-      modelKey: input.clobInput.modelKey,
-      generatedAt: new Date(input.clobInput.decisionTime).toISOString(),
       activeMarket: input.clobInput.activeMarket,
-      trend: {
-        predictedReturn: trendPrediction.predictedValue,
-        fairUpProbability: this.modelCostService.readTrendFairProbability(input, trendPrediction.predictedValue),
-        probabilities: trendPrediction.probabilities,
-        isChainlinkFresh: input.trendInput.isChainlinkFresh,
-      },
       clob: {
         currentUpMid: input.clobInput.currentUpMid,
-        predictedUpMid: clobPrediction.predictedValue,
         edge: input.clobInput.currentUpMid === null ? null : clobPrediction.predictedValue - input.clobInput.currentUpMid,
-        probabilities: clobPrediction.probabilities,
         isOrderBookFresh: input.clobInput.isOrderBookFresh,
+        predictedUpMid: clobPrediction.predictedValue,
+        probabilities: clobPrediction.probabilities,
       },
       fusion: fusionPayload,
+      generatedAt: new Date(input.clobInput.decisionTime).toISOString(),
       liveSnapshotCount: this.snapshotStoreService.getLiveSnapshots().length,
+      modelKey: input.clobInput.modelKey,
+      trend: {
+        fairUpProbability: this.modelCostService.readTrendFairProbability(input, trendPrediction.predictedValue),
+        isChainlinkFresh: input.trendInput.isChainlinkFresh,
+        predictedReturn: trendPrediction.predictedValue,
+        probabilities: trendPrediction.probabilities,
+      },
     };
     return predictionPayload;
   }
@@ -469,7 +505,7 @@ export class ModelRuntimeService {
 
   public async start(): Promise<void> {
     if (!this.isStarted) {
-      await this.modelTrainingService.ensurePythonRuntime();
+      await this.modelTrainingService.ensureTensorflowApi();
       await this.restorePersistedState();
       await this.snapshotStoreService.start();
       this.refreshLiveStatusFields();
@@ -489,16 +525,6 @@ export class ModelRuntimeService {
 
     if (this.isStarted) {
       await this.snapshotStoreService.stop();
-
-      for (const trendKey of this.trendArtifactRegistry.keys()) {
-        await this.modelTrainingService.unloadTrend(trendKey);
-      }
-
-      for (const modelKey of this.clobArtifactRegistry.keys()) {
-        await this.modelTrainingService.unloadClob(modelKey);
-      }
-
-      await this.modelTrainingService.stop();
       this.trendArtifactRegistry.clear();
       this.clobArtifactRegistry.clear();
       this.isStarted = false;
@@ -521,39 +547,35 @@ export class ModelRuntimeService {
         const clobSamples = this.modelFeatureService.buildClobTrainingSamples(mergedSnapshots);
 
         for (const asset of this.supportedAssets) {
-          const trendArtifact = await this.modelTrainingService.trainTrend(
+          const trendResult = await this.modelTrainingService.trainTrend(
             asset,
             trendSamples.filter((sample) => sample.trendKey === asset),
-            this.trendArtifactRegistry.get(asset)?.version || 0,
           );
 
-          if (trendArtifact.artifact !== null) {
-            await this.replaceTrendArtifact(asset, trendArtifact.artifact);
-            this.logTrainingBlock(asset, trendArtifact.artifact.version, trendArtifact.trainingSampleCount, trendArtifact.validationSampleCount);
+          if (trendResult.artifact !== null) {
+            this.replaceTrendArtifact(asset, trendResult.artifact);
+            this.logTrainingBlock(asset, trendResult.artifact.version, trendResult.trainingSampleCount, trendResult.validationSampleCount);
           }
         }
 
         for (const asset of this.supportedAssets) {
           for (const window of this.supportedWindows) {
             const modelKey = this.buildModelKey(asset, window);
-            const clobArtifact = await this.modelTrainingService.trainClob(
+            const clobResult = await this.modelTrainingService.trainClob(
               modelKey,
               clobSamples.filter((sample) => sample.modelKey === modelKey),
-              this.clobArtifactRegistry.get(modelKey)?.version || 0,
             );
 
-            if (clobArtifact.artifact !== null) {
-              await this.replaceClobArtifact(modelKey, clobArtifact.artifact);
-              this.logTrainingBlock(modelKey, clobArtifact.artifact.version, clobArtifact.trainingSampleCount, clobArtifact.validationSampleCount);
+            if (clobResult.artifact !== null) {
+              this.replaceClobArtifact(modelKey, clobResult.artifact);
+              this.logTrainingBlock(modelKey, clobResult.artifact.version, clobResult.trainingSampleCount, clobResult.validationSampleCount);
             }
           }
         }
 
         this.lastTrainingCycleAt = new Date().toISOString();
         this.lastTrainedSnapshotAt = mergedSnapshots.at(-1)?.generated_at || this.lastTrainedSnapshotAt;
-        await this.modelPersistenceService.persistManifest(
-          this.buildManifestTrendModels(),
-          this.buildManifestClobModels(),
+        await this.modelRuntimeStateService.persistState(
           this.lastTrainingCycleAt,
           this.lastTrainedSnapshotAt === null ? null : new Date(this.lastTrainedSnapshotAt).toISOString(),
         );
@@ -586,7 +608,7 @@ export class ModelRuntimeService {
     const predictionInput = this.modelFeatureService.buildPredictionInput(this.snapshotStoreService.getLiveSnapshots(), request);
 
     if (trendArtifact === null || clobArtifact === null) {
-      throw new Error(`no persisted model available for ${modelKey}`);
+      throw new Error(`no remote model available for ${modelKey}`);
     }
 
     if (predictionInput === null) {

@@ -305,7 +305,7 @@ export type ModelTensorflowArchitecture = {
 };
 
 export type ModelHeadArtifact = {
-  modelPath: string;
+  remoteModelId: string;
   featureNames: string[];
   featureMedians: number[];
   featureScales: number[];
@@ -318,6 +318,7 @@ export type ModelHeadArtifact = {
 
 export type ModelTrendArtifact = {
   trendKey: ModelTrendKey;
+  remoteModelId: string;
   version: number;
   trainedAt: string;
   trainingSampleCount: number;
@@ -333,6 +334,7 @@ export type ModelClobArtifact = {
   modelKey: ModelClobKey;
   asset: ModelAsset;
   window: ModelWindow;
+  remoteModelId: string;
   version: number;
   trainedAt: string;
   trainingSampleCount: number;
@@ -344,21 +346,8 @@ export type ModelClobArtifact = {
   model: ModelHeadArtifact;
 };
 
-export type ModelPersistenceTrendModel = {
-  trendKey: ModelTrendKey;
-  artifact: ModelTrendArtifact;
-};
-
-export type ModelPersistenceClobModel = {
-  modelKey: ModelClobKey;
-  artifact: ModelClobArtifact;
-  status: ModelStatus;
-};
-
-export type ModelPersistenceSnapshot = {
+export type ModelRuntimeStateSnapshot = {
   schemaVersion: number;
   lastTrainingCycleAt: string | null;
   lastTrainedSnapshotAt: string | null;
-  trendModels: ModelPersistenceTrendModel[];
-  clobModels: ModelPersistenceClobModel[];
 };
