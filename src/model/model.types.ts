@@ -95,6 +95,7 @@ export type ModelStatus = {
   clobSequenceLength: number;
   trendFeatureCount: number;
   clobFeatureCount: number;
+  headVersionSkew: boolean;
   featureCountTrend: number;
   featureCountClob: number;
   lastTrainingStartedAt: string | null;

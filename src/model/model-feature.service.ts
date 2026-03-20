@@ -24,6 +24,8 @@ import { ModelSignalCacheService } from "./model-signal-cache.service.ts";
  */
 
 const SNAPSHOT_STEP_MS = 500;
+const BTC_SHOCK_SOURCE_ASSET: ModelAsset = "btc";
+const ETH_SHOCK_SOURCE_ASSET: ModelAsset = "eth";
 const PROBABILITY_EPSILON = 1e-4;
 
 const TREND_FEATURE_NAMES = [
@@ -415,8 +417,8 @@ export class ModelFeatureService {
       this.signalCacheService.readLeaderImbalance3(contexts, index, asset),
       this.signalCacheService.readBreadthReturnMean(contexts, index, asset, 5_000),
       this.signalCacheService.readBreadthReturnStd(contexts, index, asset, 5_000),
-      this.computeShock(contexts, index, "btc"),
-      this.computeShock(contexts, index, "eth"),
+      this.computeShock(contexts, index, BTC_SHOCK_SOURCE_ASSET),
+      this.computeShock(contexts, index, ETH_SHOCK_SOURCE_ASSET),
       this.contextService.isChainlinkFresh(assetContext) ? 1 : 0,
       assetContext.chainlinkStaleMs <= 60_000 ? 1 : 0,
       assetContext.exchangeValidPriceCount >= 2 ? 1 : 0,
@@ -656,6 +658,11 @@ export class ModelFeatureService {
   public getRequiredOverlapMs(): number {
     const requiredOverlapMs = this.getMaximumSequenceLength() * SNAPSHOT_STEP_MS + this.predictionHorizonMs + this.decisionIntervalMs;
     return requiredOverlapMs;
+  }
+
+  public readShockSourceAsset(label: "btc_shock" | "eth_shock"): ModelAsset {
+    const shockSourceAsset = label === "btc_shock" ? BTC_SHOCK_SOURCE_ASSET : ETH_SHOCK_SOURCE_ASSET;
+    return shockSourceAsset;
   }
 
   public buildSnapshotContexts(snapshots: FlatSnapshot[]): ModelSnapshotContext[] {

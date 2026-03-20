@@ -22,7 +22,9 @@ test("TensorflowApiClientService sends remote requests with optional bearer auth
         },
       );
     },
+    maxAttempts: 2,
     requestTimeoutMs: 1_000,
+    retryBaseDelayMs: 0,
   });
 
   await tensorflowApiClientService.ensureReachable();
@@ -49,4 +51,96 @@ test("TensorflowApiClientService sends remote requests with optional bearer auth
   assert.equal(capturedRequests[2]?.url, "http://127.0.0.1:3100/api/models/demo-model/metadata");
   assert.equal(capturedRequests[3]?.url, "http://127.0.0.1:3100/api/models/demo-model/prediction-jobs");
   assert.equal((capturedRequests[1]?.headers as Record<string, string>).authorization, "Bearer token-1");
+});
+
+test("TensorflowApiClientService retries retryable status codes and preserves auth", async () => {
+  let requestCount = 0;
+  const capturedAuthorizationValues: string[] = [];
+  const tensorflowApiClientService = new TensorflowApiClientService({
+    authToken: "retry-token",
+    baseUrl: "http://127.0.0.1:3100",
+    fetcher: async (_url, init) => {
+      requestCount += 1;
+      capturedAuthorizationValues.push(String((init?.headers as Record<string, string>).authorization || ""));
+
+      if (requestCount < 3) {
+        return new Response(JSON.stringify({ error: "busy" }), { status: 429 });
+      }
+
+      return new Response(JSON.stringify([]), { status: 200 });
+    },
+    maxAttempts: 3,
+    requestTimeoutMs: 1_000,
+    retryBaseDelayMs: 0,
+  });
+
+  const modelRecords = await tensorflowApiClientService.readModels();
+
+  assert.deepEqual(modelRecords, []);
+  assert.equal(requestCount, 3);
+  assert.deepEqual(capturedAuthorizationValues, ["Bearer retry-token", "Bearer retry-token", "Bearer retry-token"]);
+});
+
+test("TensorflowApiClientService does not retry non-retryable status codes", async () => {
+  let requestCount = 0;
+  const tensorflowApiClientService = new TensorflowApiClientService({
+    authToken: "",
+    baseUrl: "http://127.0.0.1:3100",
+    fetcher: async () => {
+      requestCount += 1;
+      return new Response(JSON.stringify({ error: "missing" }), { status: 404 });
+    },
+    maxAttempts: 4,
+    requestTimeoutMs: 1_000,
+    retryBaseDelayMs: 0,
+  });
+
+  await assert.rejects(async () => tensorflowApiClientService.readModels(), /status=404/);
+  assert.equal(requestCount, 1);
+});
+
+test("TensorflowApiClientService retries thrown network errors until success", async () => {
+  let requestCount = 0;
+  const tensorflowApiClientService = new TensorflowApiClientService({
+    authToken: "",
+    baseUrl: "http://127.0.0.1:3100",
+    fetcher: async () => {
+      requestCount += 1;
+
+      if (requestCount < 2) {
+        throw new Error("network socket hang up");
+      }
+
+      return new Response(JSON.stringify([]), { status: 200 });
+    },
+    maxAttempts: 3,
+    requestTimeoutMs: 1_000,
+    retryBaseDelayMs: 0,
+  });
+
+  const modelRecords = await tensorflowApiClientService.readModels();
+
+  assert.deepEqual(modelRecords, []);
+  assert.equal(requestCount, 2);
+});
+
+test("TensorflowApiClientService throws enriched errors after exhausting attempts", async () => {
+  let requestCount = 0;
+  const tensorflowApiClientService = new TensorflowApiClientService({
+    authToken: "",
+    baseUrl: "http://127.0.0.1:3100",
+    fetcher: async () => {
+      requestCount += 1;
+      return new Response(JSON.stringify({ error: "unavailable" }), { status: 500 });
+    },
+    maxAttempts: 3,
+    requestTimeoutMs: 1_000,
+    retryBaseDelayMs: 0,
+  });
+
+  await assert.rejects(
+    async () => tensorflowApiClientService.readModels(),
+    /tensorflow-api request exhausted method=GET path=\/api\/models attempts=3 status=500/,
+  );
+  assert.equal(requestCount, 3);
 });

@@ -3,6 +3,7 @@
  */
 
 import config from "../config.ts";
+import logger from "../logger.ts";
 import type { ModelDirectionProbability, ModelOrderBookLevel, ModelPredictionInput, ModelPredictionPayload } from "./model.types.ts";
 
 /**
@@ -20,6 +21,9 @@ const PROBABILITY_EPSILON = 1e-4;
 type ModelCostServiceOptions = {
   clobBaseUrl: string;
   executionSize: number;
+  feeMaxAttempts: number;
+  feeRequestTimeoutMs: number;
+  feeRetryBaseDelayMs: number;
   isClobOnlyFallbackEnabled: boolean;
   feeCacheTtlMs: number;
   fetcher: typeof fetch;
@@ -48,9 +52,15 @@ export class ModelCostService {
 
   private readonly executionSize: number;
 
+  private readonly feeMaxAttempts: number;
+
   private readonly isClobOnlyFallbackEnabled: boolean;
 
   private readonly feeCacheRegistry: Map<string, FeeCacheEntry>;
+
+  private readonly feeRequestTimeoutMs: number;
+
+  private readonly feeRetryBaseDelayMs: number;
 
   private readonly feeCacheTtlMs: number;
 
@@ -73,6 +83,9 @@ export class ModelCostService {
   public constructor(options: ModelCostServiceOptions) {
     this.clobBaseUrl = options.clobBaseUrl;
     this.executionSize = options.executionSize;
+    this.feeMaxAttempts = options.feeMaxAttempts;
+    this.feeRequestTimeoutMs = options.feeRequestTimeoutMs;
+    this.feeRetryBaseDelayMs = options.feeRetryBaseDelayMs;
     this.isClobOnlyFallbackEnabled = options.isClobOnlyFallbackEnabled;
     this.feeCacheRegistry = new Map<string, FeeCacheEntry>();
     this.feeCacheTtlMs = options.feeCacheTtlMs;
@@ -92,6 +105,9 @@ export class ModelCostService {
     const modelCostService = new ModelCostService({
       clobBaseUrl: CLOB_BASE_URL,
       executionSize: config.MODEL_EXECUTION_SIZE,
+      feeMaxAttempts: config.MODEL_FEE_MAX_ATTEMPTS,
+      feeRequestTimeoutMs: config.MODEL_FEE_REQUEST_TIMEOUT_MS,
+      feeRetryBaseDelayMs: config.MODEL_FEE_RETRY_BASE_DELAY_MS,
       isClobOnlyFallbackEnabled: config.MODEL_ENABLE_CLOB_ONLY_FALLBACK,
       feeCacheTtlMs: config.MODEL_FEE_CACHE_TTL_MS,
       fetcher: fetch,
@@ -144,6 +160,11 @@ export class ModelCostService {
     const erfValue = sign * (1 - polynomial * Math.exp(-(absoluteValue * absoluteValue)));
     const normalCdf = 0.5 * (1 + erfValue);
     return normalCdf;
+  }
+
+  private buildRetryDelay(attempt: number): number {
+    const retryDelay = this.feeRetryBaseDelayMs * Math.max(attempt, 1);
+    return retryDelay;
   }
 
   private clamp(value: number, minimumValue: number, maximumValue: number): number {
@@ -249,6 +270,12 @@ export class ModelCostService {
     return score;
   }
 
+  private async sleep(delayMs: number): Promise<void> {
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, delayMs);
+    });
+  }
+
   /**
    * @section public:methods
    */
@@ -258,13 +285,54 @@ export class ModelCostService {
     let feeRateBps = cachedFeeRate === undefined ? null : cachedFeeRate;
 
     if (tokenId !== null && cachedFeeRate === undefined) {
-      const response = await this.fetcher(this.buildFeeRateUrl(tokenId));
+      let attempt = 1;
+      let hasResolved = false;
 
-      if (response.ok) {
-        const payload = (await response.json()) as { base_fee?: number };
-        feeRateBps = typeof payload.base_fee === "number" ? payload.base_fee : null;
-        this.setCachedFeeRate(tokenId, feeRateBps);
-      } else {
+      while (!hasResolved && attempt <= this.feeMaxAttempts) {
+        const abortController = new AbortController();
+        const timeoutId = setTimeout(() => {
+          abortController.abort();
+        }, this.feeRequestTimeoutMs);
+
+        try {
+          const response = await this.fetcher(this.buildFeeRateUrl(tokenId), {
+            signal: abortController.signal,
+          });
+
+          if (response.ok) {
+            const payload = (await response.json()) as { base_fee?: number };
+            feeRateBps = typeof payload.base_fee === "number" ? payload.base_fee : null;
+            this.setCachedFeeRate(tokenId, feeRateBps);
+            hasResolved = true;
+          } else {
+            const canRetry = (response.status === 429 || response.status >= 500) && attempt < this.feeMaxAttempts;
+
+            if (canRetry) {
+              logger.warn(`fee-rate retry tokenId=${tokenId} attempt=${attempt} maxAttempts=${this.feeMaxAttempts} status=${response.status}`);
+              await this.sleep(this.buildRetryDelay(attempt));
+            } else {
+              hasResolved = true;
+            }
+          }
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : "unknown error";
+          const canRetry = attempt < this.feeMaxAttempts;
+          logger.warn(`fee-rate request issue tokenId=${tokenId} attempt=${attempt} maxAttempts=${this.feeMaxAttempts} error=${errorMessage}`);
+
+          if (canRetry) {
+            await this.sleep(this.buildRetryDelay(attempt));
+          } else {
+            hasResolved = true;
+          }
+        } finally {
+          clearTimeout(timeoutId);
+        }
+
+        attempt += 1;
+      }
+
+      if (feeRateBps === null) {
+        logger.warn(`fee-rate lookup failed tokenId=${tokenId} attempts=${this.feeMaxAttempts}`);
         this.setCachedFeeRate(tokenId, null);
       }
     }

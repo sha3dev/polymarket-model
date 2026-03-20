@@ -8,7 +8,7 @@ import type { ModelAsset, ModelKey, ModelMarketContext, ModelSnapshotContext, Mo
  * @section consts
  */
 
-const LEADER_WEIGHTS: Record<ModelAsset, Record<ModelAsset, number>> = {
+const LEADER_RETURN_WEIGHTS: Record<ModelAsset, Record<ModelAsset, number>> = {
   btc: { btc: 0, eth: 0.2, sol: 0.05, xrp: 0.05 },
   eth: { btc: 0.6, eth: 0, sol: 0.1, xrp: 0.1 },
   sol: { btc: 0.6, eth: 0.3, sol: 0, xrp: 0.1 },
@@ -164,9 +164,9 @@ export class ModelSignalCacheService {
 
   private readWeightedLeaderValue(values: Array<{ asset: ModelAsset; value: number }>, asset: ModelAsset): number {
     const weightedPairs = values.filter((value) => value.asset !== asset);
-    const weightSum = weightedPairs.reduce((valueSum, pair) => valueSum + LEADER_WEIGHTS[asset][pair.asset], 0);
+    const weightSum = weightedPairs.reduce((valueSum, pair) => valueSum + LEADER_RETURN_WEIGHTS[asset][pair.asset], 0);
     const weightedLeaderValue =
-      weightSum === 0 ? 0 : weightedPairs.reduce((valueSum, pair) => valueSum + LEADER_WEIGHTS[asset][pair.asset] * pair.value, 0) / weightSum;
+      weightSum === 0 ? 0 : weightedPairs.reduce((valueSum, pair) => valueSum + LEADER_RETURN_WEIGHTS[asset][pair.asset] * pair.value, 0) / weightSum;
     return weightedLeaderValue;
   }
 
@@ -378,5 +378,10 @@ export class ModelSignalCacheService {
       previousContext === null || previousContext.marketContexts[modelKey].upBook.bookHash === currentContext.marketContexts[modelKey].upBook.bookHash ? 0 : 1;
     const signalValue = cachedValue === null ? this.setCachedValue(signalRegistry.bookHashChange, signalKey, computedValue) : cachedValue;
     return signalValue;
+  }
+
+  public readLeaderWeightProfile(asset: ModelAsset): Record<ModelAsset, number> {
+    const leaderWeightProfile = { ...LEADER_RETURN_WEIGHTS[asset] };
+    return leaderWeightProfile;
   }
 }

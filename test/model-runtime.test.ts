@@ -252,7 +252,93 @@ test("ModelRuntimeService restores remote artifacts and serves predictions", asy
 
   assert.equal(modelStatus.trendVersion, 3);
   assert.equal(modelStatus.clobVersion, 2);
+  assert.equal(modelStatus.headVersionSkew, true);
   assert.equal(predictionPayload.trend.predictedReturn, 0.03);
   assert.equal(predictionPayload.clob.predictedUpMid, 0.57);
   assert.equal(predictionPayload.fusion.suggestedSide, "up");
+});
+
+test("ModelRuntimeService scheduled wrapper does not leak unexpected cycle failures", async () => {
+  const modelRuntimeService = new ModelRuntimeService({
+    collectorClientService: {
+      async readSnapshots(): Promise<[]> {
+        return [];
+      },
+    } as never,
+    modelCostService: {
+      async buildFusionPayload(): Promise<ModelPredictionPayload["fusion"]> {
+        throw new Error("not used");
+      },
+      readTrendFairProbability(): number {
+        return 0;
+      },
+    } as never,
+    modelFeatureService: {
+      buildClobTrainingSamples(): [] {
+        return [];
+      },
+      buildFeatureNames() {
+        return { clobFeatures: ["clob-1"], trendFeatures: ["trend-1"] };
+      },
+      buildPredictionInput(): ModelPredictionInput {
+        return BUILD_PREDICTION_INPUT();
+      },
+      buildSnapshotContexts(): [] {
+        return [];
+      },
+      buildTrendTrainingSamples(): [] {
+        return [];
+      },
+      getRequiredOverlapMs(): number {
+        return 0;
+      },
+      getSequenceLength(_key: string, _head: "trend" | "clob"): number {
+        return 2;
+      },
+    } as never,
+    modelRuntimeStateService: {
+      async loadState(): Promise<{ lastTrainedSnapshotAt: string | null; lastTrainingCycleAt: string | null; schemaVersion: number }> {
+        return { lastTrainedSnapshotAt: null, lastTrainingCycleAt: null, schemaVersion: 1 };
+      },
+      async persistState(): Promise<void> {},
+    } as never,
+    modelTrainingService: {
+      async ensureTensorflowApi(): Promise<void> {},
+      async readRemoteModels(): Promise<[]> {
+        return [];
+      },
+      async trainClob(): Promise<{ artifact: null; trainingSampleCount: number; validationSampleCount: number }> {
+        return { artifact: null, trainingSampleCount: 0, validationSampleCount: 0 };
+      },
+      async trainTrend(): Promise<{ artifact: null; trainingSampleCount: number; validationSampleCount: number }> {
+        return { artifact: null, trainingSampleCount: 0, validationSampleCount: 0 };
+      },
+    } as never,
+    shouldLogTrainingProgress: false,
+    shouldRestoreOnStart: false,
+    snapshotStoreService: {
+      getLatestSnapshotAt(): null {
+        return null;
+      },
+      getLiveSnapshots(): [] {
+        return [];
+      },
+      async start(): Promise<void> {},
+      async stop(): Promise<void> {},
+    } as never,
+    supportedAssets: ["btc"],
+    supportedWindows: ["5m"],
+    trainingIntervalMs: 60_000,
+  });
+  const runtimeRecord = modelRuntimeService as unknown as Record<string, unknown>;
+  Object.defineProperty(runtimeRecord, "runTrainingCycle", {
+    configurable: true,
+    value: async (): Promise<void> => {
+      throw new Error("outer scheduler failure");
+    },
+  });
+  const scheduledTrainingMethod = runtimeRecord.runScheduledTrainingCycle as (() => Promise<void>) | undefined;
+
+  assert.notEqual(scheduledTrainingMethod, undefined);
+  await assert.doesNotReject(async () => scheduledTrainingMethod?.call(runtimeRecord));
 });

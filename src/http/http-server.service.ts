@@ -14,6 +14,7 @@ import type { ContentfulStatusCode } from "hono/utils/http-status";
 
 import { AppInfoService } from "../app-info/app-info.service.ts";
 import config from "../config.ts";
+import { DashboardService } from "../dashboard/dashboard.service.ts";
 import logger from "../logger.ts";
 import type { ModelAsset, ModelPredictionRequest, ModelWindow } from "../model/model.types.ts";
 import { ModelRuntimeService } from "../model/model-runtime.service.ts";
@@ -24,6 +25,7 @@ import { ModelRuntimeService } from "../model/model-runtime.service.ts";
 
 type HttpServerServiceOptions = {
   appInfoService: AppInfoService;
+  dashboardService: DashboardService;
   modelRuntimeService: ModelRuntimeService;
 };
 
@@ -40,6 +42,8 @@ export class HttpServerService {
 
   private readonly appInfoService: AppInfoService;
 
+  private readonly dashboardService: DashboardService;
+
   private readonly modelRuntimeService: ModelRuntimeService;
 
   /**
@@ -48,6 +52,7 @@ export class HttpServerService {
 
   public constructor(options: HttpServerServiceOptions) {
     this.appInfoService = options.appInfoService;
+    this.dashboardService = options.dashboardService;
     this.modelRuntimeService = options.modelRuntimeService;
   }
 
@@ -58,6 +63,7 @@ export class HttpServerService {
   public static createDefault(): HttpServerService {
     return new HttpServerService({
       appInfoService: AppInfoService.createDefault(),
+      dashboardService: DashboardService.createDefault(),
       modelRuntimeService: ModelRuntimeService.createDefault(),
     });
   }
@@ -69,6 +75,12 @@ export class HttpServerService {
   private respondJson<TPayload>(payload: TPayload, context: Context, status: HttpStatus): Response {
     context.header("content-type", config.RESPONSE_CONTENT_TYPE);
     const response = context.json(payload, status);
+    return response;
+  }
+
+  private respondHtml(html: string, context: Context, status: HttpStatus): Response {
+    context.header("content-type", "text/html; charset=utf-8");
+    const response = context.body(html, status);
     return response;
   }
 
@@ -116,6 +128,11 @@ export class HttpServerService {
     return response;
   }
 
+  private handleDashboardRequest(context: Context): Response {
+    const response = this.respondHtml(this.dashboardService.buildHtml(), context, 200);
+    return response;
+  }
+
   private handleModelRequest(context: Context): Response {
     const asset = context.req.param("asset") || "";
     const window = context.req.param("window") || "";
@@ -158,6 +175,7 @@ export class HttpServerService {
   public buildServer(): ServerType {
     const app = new Hono();
     app.get("/", (context) => this.handleRootRequest(context));
+    app.get("/dashboard", (context) => this.handleDashboardRequest(context));
     app.get("/models", (context) => this.handleModelsRequest(context));
     app.get("/models/:asset/:window", (context) => this.handleModelRequest(context));
     app.post("/predict", async (context) => this.handlePredictRequest(context));

@@ -183,6 +183,7 @@ export class ModelRuntimeService {
           clobSequenceLength,
           featureCountClob: clobFeatureCount,
           featureCountTrend: trendFeatureCount,
+          headVersionSkew: false,
           lastError: null,
           lastRestoredAt: null,
           lastTrainingCompletedAt: null,
@@ -250,12 +251,15 @@ export class ModelRuntimeService {
     const trendArtifact = this.trendArtifactRegistry.get(currentStatus.asset) || null;
     const clobArtifact = this.clobArtifactRegistry.get(modelKey) || null;
     const isReady = trendArtifact !== null && clobArtifact !== null;
+    const hasHeadVersionSkew =
+      trendArtifact !== null && clobArtifact !== null && (trendArtifact.version !== clobArtifact.version || trendArtifact.trainedAt !== clobArtifact.trainedAt);
     this.updateStatus(modelKey, {
       clobVersion: clobArtifact?.version || 0,
       lastError: null,
       lastTrainingCompletedAt: clobArtifact?.trainedAt || trendArtifact?.trainedAt || currentStatus.lastTrainingCompletedAt,
       lastValidationWindowEnd: clobArtifact?.lastValidationWindowEnd || trendArtifact?.lastValidationWindowEnd || null,
       lastValidationWindowStart: clobArtifact?.lastValidationWindowStart || trendArtifact?.lastValidationWindowStart || null,
+      headVersionSkew: hasHeadVersionSkew,
       metrics: this.buildCompositeMetrics(currentStatus.asset, modelKey),
       persistedVersion: clobArtifact?.version || 0,
       state: isReady ? "ready" : currentStatus.state,
@@ -470,6 +474,15 @@ export class ModelRuntimeService {
     return statusPayload;
   }
 
+  private async runScheduledTrainingCycle(): Promise<void> {
+    try {
+      await this.runTrainingCycle();
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : "scheduled training cycle failed";
+      logger.error(`scheduled training cycle failed error=${errorMessage}`);
+    }
+  }
+
   private buildPredictionPayload(
     input: ModelPredictionInput,
     trendPrediction: { predictedValue: number; probabilities: { down: number; flat: number; up: number } },
@@ -510,8 +523,8 @@ export class ModelRuntimeService {
       await this.snapshotStoreService.start();
       this.refreshLiveStatusFields();
       await this.runTrainingCycle();
-      this.trainingTimer = setInterval(async () => {
-        await this.runTrainingCycle();
+      this.trainingTimer = setInterval(() => {
+        void this.runScheduledTrainingCycle();
       }, this.trainingIntervalMs);
       this.isStarted = true;
     }

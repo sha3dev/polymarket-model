@@ -3,6 +3,7 @@
  */
 
 import config from "../config.ts";
+import logger from "../logger.ts";
 import type {
   TensorflowApiCreateModelRequest,
   TensorflowApiJobRecord,
@@ -22,6 +23,8 @@ type TensorflowApiClientServiceOptions = {
   authToken: string;
   baseUrl: string;
   fetcher: typeof fetch;
+  maxAttempts: number;
+  retryBaseDelayMs: number;
   requestTimeoutMs: number;
 };
 
@@ -40,7 +43,11 @@ export class TensorflowApiClientService {
 
   private readonly fetcher: typeof fetch;
 
+  private readonly maxAttempts: number;
+
   private readonly requestTimeoutMs: number;
+
+  private readonly retryBaseDelayMs: number;
 
   /**
    * @section constructor
@@ -50,7 +57,9 @@ export class TensorflowApiClientService {
     this.authToken = options.authToken;
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.fetcher = options.fetcher;
+    this.maxAttempts = options.maxAttempts;
     this.requestTimeoutMs = options.requestTimeoutMs;
+    this.retryBaseDelayMs = options.retryBaseDelayMs;
   }
 
   /**
@@ -62,7 +71,9 @@ export class TensorflowApiClientService {
       authToken: config.TENSORFLOW_API_AUTH_TOKEN,
       baseUrl: config.TENSORFLOW_API_URL,
       fetcher: fetch,
+      maxAttempts: config.TENSORFLOW_API_MAX_ATTEMPTS,
       requestTimeoutMs: config.TENSORFLOW_API_REQUEST_TIMEOUT_MS,
+      retryBaseDelayMs: config.TENSORFLOW_API_RETRY_BASE_DELAY_MS,
     });
     return tensorflowApiClientService;
   }
@@ -83,32 +94,82 @@ export class TensorflowApiClientService {
     return headers;
   }
 
+  private buildRetryDelay(attempt: number): number {
+    const retryDelay = this.retryBaseDelayMs * 2 ** Math.max(attempt - 1, 0) + Math.floor(Math.random() * 100);
+    return retryDelay;
+  }
+
+  private isRetryableError(status: number | null, error: unknown): boolean {
+    const errorMessage = error instanceof Error ? error.message : "";
+    const isRetryableStatus = status === 429 || (status !== null && status >= 500);
+    const isRetryableNetworkError =
+      status === null && (errorMessage.includes("AbortError") || errorMessage.includes("fetch") || errorMessage.includes("network"));
+    const isRetryableError = isRetryableStatus || isRetryableNetworkError;
+    return isRetryableError;
+  }
+
+  private async sleep(delayMs: number): Promise<void> {
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, delayMs);
+    });
+  }
+
   private async requestJson<TResponse>(pathname: string, method: "GET" | "PATCH" | "POST", payload?: unknown): Promise<TResponse> {
-    const abortController = new AbortController();
-    const timeoutId = setTimeout(() => {
-      abortController.abort();
-    }, this.requestTimeoutMs);
-    const requestInit: RequestInit = {
-      headers: this.buildHeaders(),
-      method,
-      signal: abortController.signal,
-    };
-    let responsePayload: TResponse;
+    let attempt = 1;
+    let responsePayload: TResponse | null = null;
+    let shouldContinue = true;
+    let lastError: Error | null = null;
+    let lastStatus: number | null = null;
 
-    if (payload !== undefined) {
-      requestInit.body = JSON.stringify(payload);
-    }
+    while (shouldContinue && attempt <= this.maxAttempts) {
+      const abortController = new AbortController();
+      const timeoutId = setTimeout(() => {
+        abortController.abort();
+      }, this.requestTimeoutMs);
+      const requestInit: RequestInit = {
+        headers: this.buildHeaders(),
+        method,
+        signal: abortController.signal,
+      };
 
-    try {
-      const response = await this.fetcher(`${this.baseUrl}${pathname}`, requestInit);
-
-      if (!response.ok) {
-        throw new Error(`tensorflow-api request failed path=${pathname} status=${response.status} body=${await response.text()}`);
+      if (payload !== undefined) {
+        requestInit.body = JSON.stringify(payload);
       }
 
-      responsePayload = (await response.json()) as TResponse;
-    } finally {
-      clearTimeout(timeoutId);
+      try {
+        const response = await this.fetcher(`${this.baseUrl}${pathname}`, requestInit);
+        lastStatus = response.status;
+
+        if (!response.ok) {
+          throw new Error(`tensorflow-api request failed path=${pathname} status=${response.status} body=${await response.text()}`);
+        }
+
+        responsePayload = (await response.json()) as TResponse;
+        shouldContinue = false;
+      } catch (error) {
+        const normalizedError = error instanceof Error ? error : new Error(`tensorflow-api request failed path=${pathname}`);
+        const canRetry = this.isRetryableError(lastStatus, normalizedError) && attempt < this.maxAttempts;
+        lastError = normalizedError;
+        logger.warn(
+          `tensorflow-api request issue method=${method} path=${pathname} attempt=${attempt} maxAttempts=${this.maxAttempts} status=${lastStatus === null ? "network" : lastStatus} error=${normalizedError.message}`,
+        );
+
+        if (canRetry) {
+          await this.sleep(this.buildRetryDelay(attempt));
+        } else {
+          shouldContinue = false;
+        }
+      } finally {
+        clearTimeout(timeoutId);
+      }
+
+      attempt += 1;
+    }
+
+    if (responsePayload === null) {
+      throw new Error(
+        `tensorflow-api request exhausted method=${method} path=${pathname} attempts=${this.maxAttempts} status=${lastStatus === null ? "network" : lastStatus} error=${lastError?.message || "unknown error"}`,
+      );
     }
 
     return responsePayload;

@@ -54,19 +54,27 @@ const BUILD_MODEL_PREDICTION_INPUT = (): ModelPredictionInput => {
   return predictionInput;
 };
 
-test("ModelCostService applies the exponent-2 fee curve", async () => {
+const BUILD_MODEL_COST_SERVICE = (fetcher: typeof fetch): ModelCostService => {
   const modelCostService = new ModelCostService({
     clobBaseUrl: "https://clob.polymarket.com",
     executionSize: 25,
-    isClobOnlyFallbackEnabled: true,
     feeCacheTtlMs: 60_000,
-    fetcher: async () => new Response(JSON.stringify({ base_fee: 25 }), { status: 200 }),
+    feeMaxAttempts: 3,
+    feeRequestTimeoutMs: 25,
+    feeRetryBaseDelayMs: 0,
+    fetcher,
     fusionAlpha0: 0.2,
     fusionAlpha1: 0.6,
+    isClobOnlyFallbackEnabled: true,
     maxSpread: 0.1,
     spreadBufferKappa: 0.75,
     vetoDownThreshold: 0.7,
   });
+  return modelCostService;
+};
+
+test("ModelCostService applies the exponent-2 fee curve", async () => {
+  const modelCostService = BUILD_MODEL_COST_SERVICE(async () => new Response(JSON.stringify({ base_fee: 25 }), { status: 200 }));
   const predictionInput = BUILD_MODEL_PREDICTION_INPUT();
   const fusionPayload = await modelCostService.buildFusionPayload(
     predictionInput,
@@ -84,20 +92,43 @@ test("ModelCostService applies the exponent-2 fee curve", async () => {
   assert.ok(Math.abs((fusionPayload.estimatedFeeUp || 0) - expectedFee) < 1e-12);
 });
 
-test("ModelCostService selects the down side when down edge dominates", async () => {
-  const modelCostService = new ModelCostService({
-    clobBaseUrl: "https://clob.polymarket.com",
-    executionSize: 25,
-    isClobOnlyFallbackEnabled: true,
-    feeCacheTtlMs: 60_000,
-    fetcher: async () => new Response(JSON.stringify({ base_fee: 25 }), { status: 200 }),
-    fusionAlpha0: 0.2,
-    fusionAlpha1: 0.6,
-    maxSpread: 0.1,
-    spreadBufferKappa: 0.75,
-    vetoDownThreshold: 0.7,
+test("ModelCostService retries transient fee-rate failures and caches the recovered fee", async () => {
+  let requestCount = 0;
+  const modelCostService = BUILD_MODEL_COST_SERVICE(async () => {
+    requestCount += 1;
+
+    if (requestCount === 1) {
+      return new Response(JSON.stringify({ error: "busy" }), { status: 500 });
+    }
+
+    return new Response(JSON.stringify({ base_fee: 25 }), { status: 200 });
   });
 
+  const firstFeeRateBps = await modelCostService.readFeeRateBps("up-token");
+  const secondFeeRateBps = await modelCostService.readFeeRateBps("up-token");
+
+  assert.equal(firstFeeRateBps, 25);
+  assert.equal(secondFeeRateBps, 25);
+  assert.equal(requestCount, 2);
+});
+
+test("ModelCostService caches null only after exhausting retry attempts", async () => {
+  let requestCount = 0;
+  const modelCostService = BUILD_MODEL_COST_SERVICE(async () => {
+    requestCount += 1;
+    return new Response(JSON.stringify({ error: "unavailable" }), { status: 500 });
+  });
+
+  const firstFeeRateBps = await modelCostService.readFeeRateBps("down-token");
+  const secondFeeRateBps = await modelCostService.readFeeRateBps("down-token");
+
+  assert.equal(firstFeeRateBps, null);
+  assert.equal(secondFeeRateBps, null);
+  assert.equal(requestCount, 3);
+});
+
+test("ModelCostService selects the down side when down edge dominates", async () => {
+  const modelCostService = BUILD_MODEL_COST_SERVICE(async () => new Response(JSON.stringify({ base_fee: 25 }), { status: 200 }));
   const fusionPayload = await modelCostService.buildFusionPayload(
     BUILD_MODEL_PREDICTION_INPUT(),
     {

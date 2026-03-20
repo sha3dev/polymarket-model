@@ -116,3 +116,21 @@ test("ModelFeatureService keeps trend samples when no active market exists and d
   assert.equal(trendSamples.length > 0, true);
   assert.equal(clobSamples.length, 0);
 });
+
+test("ModelFeatureService exposes explicit shock-source mapping", () => {
+  const modelFeatureService = BUILD_MODEL_FEATURE_SERVICE();
+
+  assert.equal(modelFeatureService.readShockSourceAsset("btc_shock"), "btc");
+  assert.equal(modelFeatureService.readShockSourceAsset("eth_shock"), "eth");
+});
+
+test("ModelSignalCacheService exposes explicit leader-return weights", () => {
+  const modelSignalCacheService = new ModelSignalCacheService({
+    supportedAssets: ["btc", "eth", "sol", "xrp"],
+  });
+
+  assert.deepEqual(modelSignalCacheService.readLeaderWeightProfile("btc"), { btc: 0, eth: 0.2, sol: 0.05, xrp: 0.05 });
+  assert.deepEqual(modelSignalCacheService.readLeaderWeightProfile("eth"), { btc: 0.6, eth: 0, sol: 0.1, xrp: 0.1 });
+  assert.deepEqual(modelSignalCacheService.readLeaderWeightProfile("sol"), { btc: 0.6, eth: 0.3, sol: 0, xrp: 0.1 });
+  assert.deepEqual(modelSignalCacheService.readLeaderWeightProfile("xrp"), { btc: 0.6, eth: 0.25, sol: 0.15, xrp: 0 });
+});

@@ -3,6 +3,7 @@ import { once } from "node:events";
 import { test } from "node:test";
 
 import { AppInfoService } from "../src/app-info/app-info.service.ts";
+import { DashboardService } from "../src/dashboard/dashboard.service.ts";
 import { HttpServerService } from "../src/http/http-server.service.ts";
 import type { ModelPredictionPayload, ModelStatus, ModelStatusPayload } from "../src/model/model.types.ts";
 import type { ModelRuntimeService } from "../src/model/model-runtime.service.ts";
@@ -22,6 +23,7 @@ const MODEL_STATUS: ModelStatus = {
   clobSequenceLength: 96,
   trendFeatureCount: 39,
   clobFeatureCount: 48,
+  headVersionSkew: true,
   featureCountTrend: 39,
   featureCountClob: 48,
   lastTrainingStartedAt: "2025-01-01T00:00:00.000Z",
@@ -121,6 +123,7 @@ test("HttpServerService serves status and prediction endpoints", async () => {
   } as unknown as ModelRuntimeService;
   const httpServerService = new HttpServerService({
     appInfoService: new AppInfoService("test-service"),
+    dashboardService: DashboardService.createDefault(),
     modelRuntimeService: fakeRuntime,
   });
   const server = httpServerService.buildServer();
@@ -135,6 +138,7 @@ test("HttpServerService serves status and prediction endpoints", async () => {
   }
 
   const rootResponse = await fetch(`http://127.0.0.1:${address.port}/`);
+  const dashboardResponse = await fetch(`http://127.0.0.1:${address.port}/dashboard`);
   const modelsResponse = await fetch(`http://127.0.0.1:${address.port}/models`);
   const modelResponse = await fetch(`http://127.0.0.1:${address.port}/models/btc/5m`);
   const predictionResponse = await fetch(`http://127.0.0.1:${address.port}/predict`, {
@@ -145,6 +149,13 @@ test("HttpServerService serves status and prediction endpoints", async () => {
 
   assert.equal(rootResponse.status, 200);
   assert.deepEqual(await rootResponse.json(), { ok: true, serviceName: "test-service" });
+  assert.equal(dashboardResponse.status, 200);
+  assert.equal(dashboardResponse.headers.get("content-type"), "text/html; charset=utf-8");
+  const dashboardHtml = await dashboardResponse.text();
+  assert.equal(dashboardHtml.includes("<title>"), true);
+  assert.equal(dashboardHtml.includes('id="asset"'), true);
+  assert.equal(dashboardHtml.includes('id="window"'), true);
+  assert.equal(dashboardHtml.includes("Predict"), true);
   assert.equal(modelsResponse.status, 200);
   assert.deepEqual(await modelsResponse.json(), MODEL_STATUS_PAYLOAD);
   assert.equal(modelResponse.status, 200);
