@@ -30,121 +30,135 @@ export class DashboardService {
     <title>${config.SERVICE_NAME} Dashboard</title>
     <style>
       :root {
-        --bg: #f4f2eb;
-        --panel: rgba(255,255,255,0.88);
-        --panel-strong: #ffffff;
-        --ink: #18212b;
-        --muted: #617180;
-        --line: rgba(24,33,43,0.12);
-        --ready: #1e8e5a;
-        --training: #c98a16;
-        --error: #c7413a;
-        --accent: #0f766e;
-        --accent-soft: rgba(15,118,110,0.1);
-        --shadow: 0 18px 60px rgba(18, 24, 32, 0.12);
+        --bg: #eef1eb;
+        --surface: rgba(255, 255, 255, 0.86);
+        --surface-strong: #fcfdfb;
+        --surface-soft: rgba(255, 255, 255, 0.58);
+        --ink: #11202a;
+        --muted: #5d6a74;
+        --line: rgba(17, 32, 42, 0.1);
+        --line-strong: rgba(17, 32, 42, 0.18);
+        --ready: #157a4d;
+        --training: #ba7d19;
+        --error: #be413a;
+        --idle: #6d7981;
+        --accent: #0e7c72;
+        --accent-soft: rgba(14, 124, 114, 0.08);
+        --shadow: 0 20px 50px rgba(22, 28, 36, 0.1);
       }
       * { box-sizing: border-box; }
       body {
         margin: 0;
-        font-family: Georgia, "Times New Roman", serif;
+        font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
         color: var(--ink);
         background:
-          radial-gradient(circle at top left, rgba(15,118,110,0.18), transparent 28%),
-          radial-gradient(circle at top right, rgba(201,138,22,0.16), transparent 32%),
-          linear-gradient(180deg, #f7f3ea 0%, #eef3f1 100%);
+          radial-gradient(circle at top left, rgba(14,124,114,0.14), transparent 24%),
+          radial-gradient(circle at 85% 0%, rgba(186,125,25,0.14), transparent 26%),
+          linear-gradient(180deg, #f6f8f2 0%, #e9efee 100%);
       }
       .shell {
-        max-width: 1320px;
+        max-width: 1560px;
         margin: 0 auto;
-        padding: 32px 20px 64px;
+        padding: 16px 16px 24px;
       }
-      .hero {
-        display: grid;
-        grid-template-columns: 1.2fr 0.8fr;
-        gap: 20px;
-        align-items: stretch;
-      }
-      .hero-card, .panel {
-        background: var(--panel);
-        border: 1px solid var(--line);
-        border-radius: 22px;
+      .panel {
+        background: var(--surface);
+        border: 1px solid var(--line-strong);
+        border-radius: 18px;
         box-shadow: var(--shadow);
-        backdrop-filter: blur(18px);
+        backdrop-filter: blur(14px);
       }
-      .hero-copy {
-        padding: 28px;
+      .topbar {
+        display: grid;
+        grid-template-columns: minmax(0, 1.6fr) minmax(360px, 0.9fr);
+        gap: 12px;
+        align-items: start;
+      }
+      .intro {
+        padding: 14px 16px;
       }
       .eyebrow {
-        display: inline-block;
-        padding: 6px 10px;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        padding: 5px 9px;
         border-radius: 999px;
-        font-size: 12px;
-        letter-spacing: 0.12em;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
         text-transform: uppercase;
         background: var(--accent-soft);
         color: var(--accent);
       }
       h1 {
-        margin: 16px 0 12px;
-        font-size: clamp(34px, 4vw, 56px);
-        line-height: 0.94;
+        margin: 10px 0 4px;
+        font-size: clamp(22px, 2vw, 34px);
+        line-height: 1.02;
+        letter-spacing: -0.03em;
       }
       .lede {
-        max-width: 60ch;
+        margin: 0;
         color: var(--muted);
-        font-size: 18px;
-        line-height: 1.55;
+        font-size: 13px;
+        line-height: 1.45;
       }
       .summary-grid {
         display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 14px;
-        margin-top: 20px;
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+        gap: 8px;
+        margin-top: 12px;
       }
       .metric {
-        padding: 16px;
-        border-radius: 18px;
-        background: var(--panel-strong);
+        padding: 10px 11px;
+        border-radius: 14px;
+        background: var(--surface-strong);
         border: 1px solid var(--line);
       }
       .metric-label {
         color: var(--muted);
-        font-size: 12px;
+        font-size: 10px;
+        font-weight: 700;
         text-transform: uppercase;
-        letter-spacing: 0.12em;
+        letter-spacing: 0.08em;
       }
       .metric-value {
-        margin-top: 8px;
-        font-size: 24px;
+        margin-top: 5px;
+        font-size: 15px;
         font-weight: 700;
+        line-height: 1.15;
       }
       .predict-card {
-        padding: 24px;
+        padding: 14px;
       }
       .predict-grid {
         display: grid;
-        gap: 14px;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 132px;
+        gap: 8px;
+        align-items: end;
       }
       .field label {
         display: block;
-        margin-bottom: 6px;
+        margin-bottom: 4px;
         color: var(--muted);
-        font-size: 12px;
+        font-size: 10px;
+        font-weight: 700;
         text-transform: uppercase;
-        letter-spacing: 0.12em;
+        letter-spacing: 0.08em;
       }
       select, button {
         width: 100%;
-        border-radius: 14px;
+        min-height: 40px;
+        border-radius: 12px;
         border: 1px solid var(--line);
-        background: var(--panel-strong);
-        padding: 14px 16px;
+        background: var(--surface-strong);
+        padding: 10px 12px;
         font: inherit;
         color: var(--ink);
+        font-size: 14px;
       }
       button {
         cursor: pointer;
-        background: linear-gradient(135deg, #0f766e, #155e75);
+        background: linear-gradient(135deg, #0f766e, #145f73);
         color: white;
         font-weight: 700;
       }
@@ -153,33 +167,82 @@ export class DashboardService {
         cursor: wait;
       }
       .section {
-        margin-top: 24px;
+        margin-top: 12px;
       }
       .section-head {
         display: flex;
         justify-content: space-between;
         align-items: center;
-        margin-bottom: 14px;
+        margin-bottom: 8px;
+        gap: 12px;
       }
       .section-head h2 {
         margin: 0;
-        font-size: 24px;
+        font-size: 14px;
+        font-weight: 800;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
       }
-      .models-grid {
+      .section-note {
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .models-shell {
+        overflow: auto;
+        border-radius: 18px;
+      }
+      .models-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12px;
+      }
+      .models-table th,
+      .models-table td {
+        padding: 9px 10px;
+        border-bottom: 1px solid var(--line);
+        text-align: left;
+        vertical-align: top;
+        white-space: nowrap;
+      }
+      .models-table th {
+        position: sticky;
+        top: 0;
+        z-index: 1;
+        background: rgba(252, 253, 251, 0.96);
+        color: var(--muted);
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+      .models-table tr:last-child td {
+        border-bottom: 0;
+      }
+      .models-table td.wrap {
+        white-space: normal;
+        min-width: 220px;
+        max-width: 320px;
+      }
+      .models-table td.numeric {
+        font-variant-numeric: tabular-nums;
+      }
+      .key {
+        font-weight: 700;
+        letter-spacing: -0.01em;
+      }
+      .subtle {
+        color: var(--muted);
+      }
+      .stack {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-        gap: 16px;
-      }
-      .model-card, .result-card {
-        padding: 18px;
+        gap: 2px;
       }
       .pill {
         display: inline-flex;
         align-items: center;
-        gap: 8px;
+        gap: 6px;
         border-radius: 999px;
-        padding: 6px 10px;
-        font-size: 12px;
+        padding: 4px 8px;
+        font-size: 10px;
         font-weight: 700;
         text-transform: uppercase;
         letter-spacing: 0.08em;
@@ -187,87 +250,97 @@ export class DashboardService {
       .pill.ready { background: rgba(30,142,90,0.12); color: var(--ready); }
       .pill.training { background: rgba(201,138,22,0.12); color: var(--training); }
       .pill.error { background: rgba(199,65,58,0.12); color: var(--error); }
-      .pill.idle { background: rgba(24,33,43,0.08); color: var(--muted); }
-      .model-meta {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 10px;
-        margin-top: 14px;
-      }
-      .meta-block {
-        padding: 12px;
-        border-radius: 16px;
-        background: var(--panel-strong);
-        border: 1px solid var(--line);
-      }
-      .meta-title {
-        color: var(--muted);
-        font-size: 11px;
-        text-transform: uppercase;
-        letter-spacing: 0.12em;
-      }
-      .meta-value {
-        margin-top: 6px;
-        font-size: 16px;
-        font-weight: 700;
-      }
+      .pill.idle { background: rgba(17,32,42,0.08); color: var(--idle); }
       .result-layout {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-        gap: 14px;
+        grid-template-columns: 1.05fr 1.05fr 0.95fr 0.95fr;
+        gap: 8px;
       }
       .result-box {
-        padding: 14px;
-        border-radius: 16px;
-        background: var(--panel-strong);
+        padding: 11px 12px;
+        border-radius: 14px;
+        background: var(--surface-strong);
         border: 1px solid var(--line);
       }
       .result-box h3 {
-        margin: 0 0 10px;
-        font-size: 16px;
+        margin: 0 0 6px;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+      .result-kv {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 4px 10px;
+        font-size: 12px;
+      }
+      .result-kv span:nth-child(odd) {
+        color: var(--muted);
+      }
+      .result-kv span:nth-child(even) {
+        font-weight: 700;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
       }
       .result-list {
         margin: 0;
-        padding-left: 18px;
+        padding-left: 16px;
         color: var(--muted);
+        font-size: 12px;
       }
       .empty {
         color: var(--muted);
-        padding: 18px;
-        border-radius: 16px;
+        padding: 14px;
+        border-radius: 14px;
         background: rgba(255,255,255,0.55);
         border: 1px dashed var(--line);
+        font-size: 13px;
       }
-      @media (max-width: 900px) {
-        .hero {
+      .mono {
+        font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+      }
+      @media (max-width: 1100px) {
+        .topbar {
           grid-template-columns: 1fr;
         }
         .summary-grid {
+          grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+        .predict-grid {
           grid-template-columns: 1fr 1fr;
+        }
+        .result-layout {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
         }
       }
       @media (max-width: 640px) {
-        .summary-grid, .model-meta, .result-layout {
+        .shell {
+          padding: 10px 10px 18px;
+        }
+        .summary-grid,
+        .predict-grid,
+        .result-layout {
           grid-template-columns: 1fr;
+        }
+        .intro,
+        .predict-card {
+          padding: 12px;
         }
       }
     </style>
   </head>
   <body>
     <div class="shell">
-      <section class="hero">
-        <article class="hero-card hero-copy">
-          <span class="eyebrow">Operator Dashboard</span>
-          <h1>Market decisions, model state, and live prediction in one screen.</h1>
-          <p class="lede">
-            This service watches crypto prices and Polymarket order books, runs two short-term models, and combines them with trading costs.
-            The dashboard shows whether the system is healthy, what each market model is doing, and what the service would predict right now.
-          </p>
+      <section class="topbar">
+        <article class="panel intro">
+          <span class="eyebrow">Operator Console</span>
+          <h1>${config.SERVICE_NAME}</h1>
+          <p class="lede">Dense live view of runtime state, head versions, training progress, active markets, and current prediction output.</p>
           <div class="summary-grid" id="summary-grid"></div>
         </article>
-        <aside class="hero-card predict-card">
+        <aside class="panel predict-card">
           <div class="section-head">
-            <h2>Live Predict</h2>
+            <h2>Predict</h2>
             <span class="pill idle" id="predict-status">Ready</span>
           </div>
           <div class="predict-grid">
@@ -287,13 +360,14 @@ export class DashboardService {
       <section class="section">
         <div class="section-head">
           <h2>Models</h2>
+          <div class="section-note">Trend and CLOB heads share a row so you can spot skew, freshness, versions, and validation quality at a glance.</div>
         </div>
-        <div class="models-grid" id="models-grid"></div>
+        <div class="panel models-shell" id="models-grid"></div>
       </section>
 
       <section class="section">
         <div class="section-head">
-          <h2>Prediction Result</h2>
+          <h2>Prediction</h2>
         </div>
         <div id="prediction-result" class="empty">Run a prediction to see the trend forecast, CLOB forecast, executable scores, vetoes, and reasons.</div>
       </section>
@@ -345,59 +419,104 @@ export class DashboardService {
         const uniqueWindows = [...new Set(statusPayload.models.map((model) => model.window))];
         assetSelect.innerHTML = uniqueAssets.map((asset) => \`<option value="\${asset}">\${asset.toUpperCase()}</option>\`).join("");
         windowSelect.innerHTML = uniqueWindows.map((window) => \`<option value="\${window}">\${window}</option>\`).join("");
-        modelsGrid.innerHTML = statusPayload.models.map((model) => \`
-          <article class="panel model-card">
-            <div class="section-head">
-              <div>
-                <h3 style="margin:0 0 6px;">\${model.modelKey}</h3>
-                <div style="color:var(--muted);font-size:14px;">\${model.activeMarket?.slug || "No active market"}</div>
-              </div>
-              <span class="pill \${buildStateClass(model.state)}">\${model.state}</span>
-            </div>
-            <div class="model-meta">
-              <div class="meta-block"><div class="meta-title">Trend Version</div><div class="meta-value">\${model.trendVersion}</div></div>
-              <div class="meta-block"><div class="meta-title">CLOB Version</div><div class="meta-value">\${model.clobVersion}</div></div>
-              <div class="meta-block"><div class="meta-title">Version Skew</div><div class="meta-value">\${model.headVersionSkew ? "Yes" : "No"}</div></div>
-              <div class="meta-block"><div class="meta-title">Samples</div><div class="meta-value">\${model.trainingSampleCount}/\${model.validationSampleCount}</div></div>
-              <div class="meta-block"><div class="meta-title">Latest Snapshot</div><div class="meta-value">\${model.latestSnapshotAt || "n/a"}</div></div>
-              <div class="meta-block"><div class="meta-title">Last Error</div><div class="meta-value">\${model.lastError || "None"}</div></div>
-            </div>
-          </article>
-        \`).join("");
+        modelsGrid.innerHTML = \`
+          <table class="models-table">
+            <thead>
+              <tr>
+                <th>Model</th>
+                <th>State</th>
+                <th>Trend</th>
+                <th>CLOB</th>
+                <th>Seq</th>
+                <th>Features</th>
+                <th>Samples</th>
+                <th>Validation</th>
+                <th>Latest</th>
+                <th>Market</th>
+                <th>Error</th>
+              </tr>
+            </thead>
+            <tbody>
+              \${statusPayload.models.map((model) => \`
+                <tr>
+                  <td>
+                    <div class="stack">
+                      <span class="key mono">\${model.modelKey}</span>
+                      <span class="subtle">\${model.asset.toUpperCase()} / \${model.window}</span>
+                    </div>
+                  </td>
+                  <td>
+                    <div class="stack">
+                      <span class="pill \${buildStateClass(model.state)}">\${model.state}</span>
+                      <span class="subtle">\${model.headVersionSkew ? "skew" : "aligned"}</span>
+                    </div>
+                  </td>
+                  <td class="numeric">
+                    <div class="stack">
+                      <span>v\${model.trendVersion}</span>
+                      <span class="subtle mono">\${model.trendModelKey}</span>
+                    </div>
+                  </td>
+                  <td class="numeric">v\${model.clobVersion}</td>
+                  <td class="numeric">\${model.trendSequenceLength} / \${model.clobSequenceLength}</td>
+                  <td class="numeric">\${model.trendFeatureCount} / \${model.clobFeatureCount}</td>
+                  <td class="numeric">\${model.trainingSampleCount} / \${model.validationSampleCount}</td>
+                  <td class="wrap">
+                    <div class="stack">
+                      <span class="subtle">end</span>
+                      <span>\${model.lastValidationWindowEnd || "n/a"}</span>
+                    </div>
+                  </td>
+                  <td class="wrap">
+                    <div class="stack">
+                      <span>\${model.latestSnapshotAt || "n/a"}</span>
+                      <span class="subtle">live \${model.liveSnapshotCount}</span>
+                    </div>
+                  </td>
+                  <td class="wrap">\${model.activeMarket?.slug || "No active market"}</td>
+                  <td class="wrap">\${model.lastError || "None"}</td>
+                </tr>
+              \`).join("")}
+            </tbody>
+          </table>
+        \`;
       };
 
       const renderPrediction = (payload) => {
         predictionResult.className = "result-layout";
         predictionResult.innerHTML = \`
-          <div class="panel result-card">
-            <div class="result-layout">
-              <div class="result-box">
-                <h3>Trend</h3>
-                <div>Predicted return: <strong>\${formatValue(payload.trend.predictedReturn)}</strong></div>
-                <div>Fair UP probability: <strong>\${formatValue(payload.trend.fairUpProbability)}</strong></div>
-                <div>UP / FLAT / DOWN: <strong>\${formatValue(payload.trend.probabilities.up)} / \${formatValue(payload.trend.probabilities.flat)} / \${formatValue(payload.trend.probabilities.down)}</strong></div>
-              </div>
-              <div class="result-box">
-                <h3>CLOB</h3>
-                <div>Current UP midpoint: <strong>\${formatValue(payload.clob.currentUpMid)}</strong></div>
-                <div>Predicted UP midpoint: <strong>\${formatValue(payload.clob.predictedUpMid)}</strong></div>
-                <div>Edge: <strong>\${formatValue(payload.clob.edge)}</strong></div>
-              </div>
-              <div class="result-box">
-                <h3>Decision</h3>
-                <div>Suggested side: <strong>\${payload.fusion.suggestedSide}</strong></div>
-                <div>Should trade: <strong>\${payload.fusion.shouldTrade ? "Yes" : "No"}</strong></div>
-                <div>Score UP / DOWN: <strong>\${formatValue(payload.fusion.scoreUp)} / \${formatValue(payload.fusion.scoreDown)}</strong></div>
-              </div>
-              <div class="result-box">
-                <h3>Vetoes</h3>
-                \${payload.fusion.vetoes.length === 0 ? '<div>None</div>' : '<ul class="result-list">' + payload.fusion.vetoes.map((item) => '<li>' + item + '</li>').join('') + '</ul>'}
-              </div>
-              <div class="result-box">
-                <h3>Reasons</h3>
-                \${payload.fusion.reasons.length === 0 ? '<div>None</div>' : '<ul class="result-list">' + payload.fusion.reasons.map((item) => '<li>' + item + '</li>').join('') + '</ul>'}
-              </div>
+          <div class="panel result-box">
+            <h3>Trend</h3>
+            <div class="result-kv">
+              <span>Predicted return</span><span>\${formatValue(payload.trend.predictedReturn)}</span>
+              <span>Fair UP probability</span><span>\${formatValue(payload.trend.fairUpProbability)}</span>
+              <span>UP / FLAT / DOWN</span><span>\${formatValue(payload.trend.probabilities.up)} / \${formatValue(payload.trend.probabilities.flat)} / \${formatValue(payload.trend.probabilities.down)}</span>
+              <span>Chainlink fresh</span><span>\${payload.trend.isChainlinkFresh ? "yes" : "no"}</span>
             </div>
+          </div>
+          <div class="panel result-box">
+            <h3>CLOB</h3>
+            <div class="result-kv">
+              <span>Current UP midpoint</span><span>\${formatValue(payload.clob.currentUpMid)}</span>
+              <span>Predicted UP midpoint</span><span>\${formatValue(payload.clob.predictedUpMid)}</span>
+              <span>Edge</span><span>\${formatValue(payload.clob.edge)}</span>
+              <span>Book fresh</span><span>\${payload.clob.isOrderBookFresh ? "yes" : "no"}</span>
+            </div>
+          </div>
+          <div class="panel result-box">
+            <h3>Decision</h3>
+            <div class="result-kv">
+              <span>Suggested side</span><span>\${payload.fusion.suggestedSide}</span>
+              <span>Should trade</span><span>\${payload.fusion.shouldTrade ? "yes" : "no"}</span>
+              <span>Score UP</span><span>\${formatValue(payload.fusion.scoreUp)}</span>
+              <span>Score DOWN</span><span>\${formatValue(payload.fusion.scoreDown)}</span>
+              <span>Mode</span><span>\${payload.fusion.mode}</span>
+            </div>
+          </div>
+          <div class="panel result-box">
+            <h3>Vetoes / Reasons</h3>
+            \${payload.fusion.vetoes.length === 0 ? "<div class=\\"subtle\\">No vetoes</div>" : "<ul class=\\"result-list\\">" + payload.fusion.vetoes.map((item) => "<li>" + item + "</li>").join("") + "</ul>"}
+            \${payload.fusion.reasons.length === 0 ? "<div class=\\"subtle\\" style=\\"margin-top:8px;\\">No extra reasons</div>" : "<ul class=\\"result-list\\" style=\\"margin-top:8px;\\">" + payload.fusion.reasons.map((item) => "<li>" + item + "</li>").join("") + "</ul>"}
           </div>
         \`;
       };
