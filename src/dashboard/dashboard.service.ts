@@ -187,6 +187,38 @@ export class DashboardService {
         color: var(--muted);
         font-size: 11px;
       }
+      .help-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px;
+      }
+      .help-card {
+        padding: 12px;
+        border-radius: 14px;
+        background: var(--surface-strong);
+        border: 1px solid var(--line);
+      }
+      .help-card h3 {
+        margin: 0 0 8px;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+      .help-card dl {
+        margin: 0;
+        display: grid;
+        gap: 6px;
+      }
+      .help-card dt {
+        font-size: 11px;
+        font-weight: 700;
+      }
+      .help-card dd {
+        margin: 0;
+        color: var(--muted);
+        font-size: 12px;
+        line-height: 1.35;
+      }
       .hint {
         display: inline-flex;
         align-items: center;
@@ -316,6 +348,9 @@ export class DashboardService {
         .topbar {
           grid-template-columns: 1fr;
         }
+        .help-grid {
+          grid-template-columns: 1fr;
+        }
         .summary-grid {
           grid-template-columns: repeat(3, minmax(0, 1fr));
         }
@@ -373,9 +408,61 @@ export class DashboardService {
       <section class="section">
         <div class="section-head">
           <h2>Models</h2>
-          <div class="section-note">Trend and CLOB heads share a row so you can spot skew, freshness, versions, and validation quality at a glance.</div>
+          <div class="section-note">One row per market. The table focuses on how many times each head has trained, what data it used, and whether it is ready now.</div>
         </div>
         <div class="panel models-shell" id="models-grid"></div>
+      </section>
+
+      <section class="section">
+        <div class="section-head">
+          <h2>Help</h2>
+          <div class="section-note">Read this first if the dashboard terms are unfamiliar.</div>
+        </div>
+        <div class="help-grid">
+          <article class="panel help-card">
+            <h3>Top Summary</h3>
+            <dl>
+              <dt>Training Now</dt>
+              <dd>Shows whether the service is currently inside a training pass.</dd>
+              <dt>Markets Ready</dt>
+              <dd>How many markets already have both required models trained: the crypto trend model and the order-book model.</dd>
+              <dt>Trend Trainings</dt>
+              <dd>The highest successful training count among the trend models. Bigger means the service has retrained more times.</dd>
+              <dt>Book Trainings</dt>
+              <dd>The highest successful training count among the Polymarket order-book models.</dd>
+              <dt>Last Catch-up Pass</dt>
+              <dd>The last time the runtime finished processing a historical training block and moved its cursor forward.</dd>
+            </dl>
+          </article>
+          <article class="panel help-card">
+            <h3>Models Table</h3>
+            <dl>
+              <dt>Trend Trainings / Book Trainings</dt>
+              <dd>How many successful fits each model has had. Trend is the crypto-side model. Book is the Polymarket order-book model.</dd>
+              <dt>History Used</dt>
+              <dd>How many time steps each model sees at once. It is shown as trend steps / book steps.</dd>
+              <dt>Inputs</dt>
+              <dd>How many numeric inputs each model receives at each step in its history window, shown as trend inputs / book inputs.</dd>
+              <dt>Examples</dt>
+              <dd>The number of examples used in the last fit, shown as training examples / validation examples.</dd>
+              <dt>Latest Validation</dt>
+              <dd>The end time of the newest holdout slice used to check whether the latest model still generalizes.</dd>
+            </dl>
+          </article>
+          <article class="panel help-card">
+            <h3>Prediction Panel</h3>
+            <dl>
+              <dt>Trend</dt>
+              <dd>The crypto-side forecast. It predicts the underlying asset move over the forecast horizon.</dd>
+              <dt>CLOB</dt>
+              <dd>The Polymarket book forecast. It predicts where the UP token midpoint is likely to move.</dd>
+              <dt>Decision</dt>
+              <dd>The final result after applying fees, spread, slippage, freshness checks, and liquidity checks.</dd>
+              <dt>Vetoes / Reasons</dt>
+              <dd>Vetoes are hard blockers. Reasons explain the final yes/no decision in plain text.</dd>
+            </dl>
+          </article>
+        </div>
       </section>
 
       <section class="section">
@@ -435,14 +522,33 @@ export class DashboardService {
         return ["ready", "training", "error", "idle"].includes(value) ? value : "idle";
       };
 
+      const buildReadyCount = (models) => {
+        return models.filter((model) => model.state === "ready").length;
+      };
+
+      const buildErrorCount = (models) => {
+        return models.filter((model) => model.state === "error").length;
+      };
+
+      const buildHighestTrendVersion = (models) => {
+        return models.reduce((maximumValue, model) => Math.max(maximumValue, model.trendVersion || 0), 0);
+      };
+
+      const buildHighestClobVersion = (models) => {
+        return models.reduce((maximumValue, model) => Math.max(maximumValue, model.clobVersion || 0), 0);
+      };
+
       const renderSummary = (statusPayload) => {
         const summaryItems = [
           { label: "Service", value: state.appInfo?.serviceName || "${config.SERVICE_NAME}" },
-          { label: "Training Cycle", value: statusPayload.isTrainingCycleRunning ? "Running" : "Idle" },
+          { label: "Training Now", value: statusPayload.isTrainingCycleRunning ? "Yes" : "No" },
+          { label: "Markets Ready", value: \`\${buildReadyCount(statusPayload.models)} / \${statusPayload.models.length}\` },
+          { label: "Markets With Error", value: buildErrorCount(statusPayload.models) },
           { label: "Live Snapshots", value: statusPayload.liveSnapshotCount ?? 0 },
           { label: "Latest Snapshot", value: formatTimestamp(statusPayload.latestSnapshotAt) },
-          { label: "Last Training", value: formatTimestamp(statusPayload.lastTrainingCycleAt) },
-          { label: "Markets", value: statusPayload.models.length },
+          { label: "Last Catch-up Pass", value: formatTimestamp(statusPayload.lastTrainingCycleAt) },
+          { label: "Trend Trainings", value: buildHighestTrendVersion(statusPayload.models) },
+          { label: "Book Trainings", value: buildHighestClobVersion(statusPayload.models) },
         ];
         summaryGrid.innerHTML = summaryItems.map((item) => \`<div class="metric"><div class="metric-label">\${item.label}</div><div class="metric-value">\${item.value}</div></div>\`).join("");
       };
@@ -457,17 +563,17 @@ export class DashboardService {
           <table class="models-table">
             <thead>
               <tr>
-                <th><span class="hint" title="Asset-window identifier for this market model.">Model</span></th>
-                <th><span class="hint" title="Current runtime state for this market plus whether trend and CLOB heads are aligned or skewed.">State</span></th>
-                <th><span class="hint" title="Trend head version and the asset key used by the crypto trend model.">Trend</span></th>
-                <th><span class="hint" title="CLOB head version used for this exact asset-window market.">CLOB</span></th>
-                <th><span class="hint" title="Sequence lengths fed into the trend and CLOB models, shown as trend / clob.">Seq</span></th>
-                <th><span class="hint" title="Feature counts used by the trend and CLOB models, shown as trend / clob.">Features</span></th>
-                <th><span class="hint" title="Training and validation sample counts used by the latest fitted head, shown as train / valid.">Samples</span></th>
-                <th><span class="hint" title="End timestamp of the latest validation window used to evaluate the current model.">Validation</span></th>
-                <th><span class="hint" title="Newest live snapshot time currently buffered in memory, plus live snapshot count.">Latest</span></th>
-                <th><span class="hint" title="Current active Polymarket market slug associated with this asset-window.">Market</span></th>
-                <th><span class="hint" title="Most recent runtime or remote-training error for this market.">Error</span></th>
+                <th><span class="hint" title="Which market this row refers to.">Market Model</span></th>
+                <th><span class="hint" title="Whether this market is ready, still training, idle, or in error. Skew means the two heads were trained at different times.">Status</span></th>
+                <th><span class="hint" title="How many times the crypto trend model for this asset has trained successfully.">Trend Trainings</span></th>
+                <th><span class="hint" title="How many times the Polymarket order-book model for this exact market has trained successfully.">Book Trainings</span></th>
+                <th><span class="hint" title="How much time history each model sees at once, shown as trend steps / book steps.">History Used</span></th>
+                <th><span class="hint" title="How many numeric inputs each model sees at each step, shown as trend inputs / book inputs.">Inputs</span></th>
+                <th><span class="hint" title="How many examples were used in the latest fit, shown as train / validation.">Examples</span></th>
+                <th><span class="hint" title="The end time of the latest holdout slice used to evaluate the model.">Latest Validation</span></th>
+                <th><span class="hint" title="Newest live snapshot buffered in memory, plus the live snapshot count.">Live Data</span></th>
+                <th><span class="hint" title="Current active Polymarket market slug for this row.">Active Market</span></th>
+                <th><span class="hint" title="Current blocking problem for this row, if any.">Current Issue</span></th>
               </tr>
             </thead>
             <tbody>
@@ -485,19 +591,14 @@ export class DashboardService {
                       <span class="subtle">\${model.headVersionSkew ? "skew" : "aligned"}</span>
                     </div>
                   </td>
-                  <td class="numeric">
-                    <div class="stack">
-                      <span>v\${model.trendVersion}</span>
-                      <span class="subtle mono">\${model.trendModelKey}</span>
-                    </div>
-                  </td>
-                  <td class="numeric">v\${model.clobVersion}</td>
+                  <td class="numeric">\${model.trendVersion}</td>
+                  <td class="numeric">\${model.clobVersion}</td>
                   <td class="numeric">\${model.trendSequenceLength} / \${model.clobSequenceLength}</td>
                   <td class="numeric">\${model.trendFeatureCount} / \${model.clobFeatureCount}</td>
                   <td class="numeric">\${model.trainingSampleCount} / \${model.validationSampleCount}</td>
                   <td class="wrap">
                     <div class="stack">
-                      <span class="subtle">end</span>
+                      <span class="subtle">latest check</span>
                       <span>\${formatTimestamp(model.lastValidationWindowEnd)}</span>
                     </div>
                   </td>
