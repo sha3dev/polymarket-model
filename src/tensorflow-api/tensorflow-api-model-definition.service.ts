@@ -306,7 +306,7 @@ export class TensorflowApiModelDefinitionService {
     layers.push(this.buildDropoutLayer("trunk_dropout", "trunk_dense_1", [null, 128], architecture.dropout));
     layers.push(this.buildDenseLayer("trunk_dense_2", 64, "gelu", "trunk_dropout", [null, 128]));
     layers.push(this.buildDenseLayer("regression", 1, null, "trunk_dense_2", [null, 64]));
-    layers.push(this.buildDenseLayer("classification", 3, null, "trunk_dense_2", [null, 64]));
+    layers.push(this.buildDenseLayer("classification", 2, null, "trunk_dense_2", [null, 64]));
 
     const modelConfig: Record<string, unknown> = {
       input_layers: [["sequence_input", 0, 0]],
@@ -344,7 +344,10 @@ export class TensorflowApiModelDefinitionService {
             registered_name: null,
           },
         },
-        metrics: [],
+        metrics: {
+          classification: [],
+          regression: [],
+        },
         optimizer: {
           class_name: "Adam",
           config: {

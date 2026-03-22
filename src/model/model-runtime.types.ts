@@ -1,38 +1,42 @@
-import type {
-  ModelClobArtifact,
-  ModelClobSample,
-  ModelDirectionClass,
-  ModelDirectionProbability,
-  ModelTrendArtifact,
-  ModelTrendSample,
-} from "./model.types.ts";
+import type { ModelDirectionProbability, ModelPredictionRecord, ModelPredictionSource } from "./model.types.ts";
 
 export type ModelHeadPrediction = {
-  predictedValue: number;
-  probabilities: ModelDirectionProbability;
+  predictedDirection: "down" | "up";
+  predictedProbability: ModelDirectionProbability;
+  predictedReturn: number;
 };
 
-export type ModelLabelingResult = {
-  classWeights: [number, number, number];
-  labels: ModelDirectionClass[];
-  threshold: number;
-};
-
-export type ModelTrainingSplit<TSample extends ModelClobSample | ModelTrendSample> = {
+export type ModelTrainingSplit<TSample> = {
   trainingSamples: TSample[];
   validationSamples: TSample[];
   validationWindowEnd: string | null;
   validationWindowStart: string | null;
 };
 
-export type ModelTrendTrainResult = {
-  artifact: ModelTrendArtifact | null;
+export type ModelTrainResult = {
+  artifact: import("./model.types.ts").ModelArtifact | null;
   trainingSampleCount: number;
   validationSampleCount: number;
 };
 
-export type ModelClobTrainResult = {
-  artifact: ModelClobArtifact | null;
-  trainingSampleCount: number;
-  validationSampleCount: number;
+export type ModelPendingPrediction = {
+  asset: import("./model.types.ts").ModelAsset;
+  predictionId: string;
+  source: ModelPredictionSource;
+  targetEndAt: number;
+};
+
+export type ModelPredictionResolution = {
+  actualDirection: "down" | "up";
+  actualReturn: number;
+  downValueAtTargetEnd: number;
+  isCorrect: boolean;
+  referenceValueAtTargetEnd: number;
+  resolvedAt: string;
+  upValueAtTargetEnd: number;
+};
+
+export type ModelPredictionHistorySnapshot = {
+  predictions: ModelPredictionRecord[];
+  rollingPredictionOutcomes: boolean[];
 };

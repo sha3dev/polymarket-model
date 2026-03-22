@@ -5,116 +5,84 @@ import { test } from "node:test";
 import { AppInfoService } from "../src/app-info/app-info.service.ts";
 import { DashboardService } from "../src/dashboard/dashboard.service.ts";
 import { HttpServerService } from "../src/http/http-server.service.ts";
-import type { ModelPredictionPayload, ModelStatus, ModelStatusPayload } from "../src/model/model.types.ts";
+import type { ModelPredictionPayload, ModelPredictionRecordPayload, ModelStatus, ModelStatusPayload } from "../src/model/model.types.ts";
 import type { ModelRuntimeService } from "../src/model/model-runtime.service.ts";
 
-const MODEL_STATUS: ModelStatus = {
-  modelKey: "btc_5m",
+const ASSET_STATUS: ModelStatus = {
   asset: "btc",
-  window: "5m",
-  state: "ready",
-  modelFamily: "tcn",
-  version: 2,
-  trendModelKey: "btc",
-  trendVersion: 3,
-  clobVersion: 2,
-  trendSequenceLength: 180,
-  clobSequenceLength: 96,
-  trendFeatureCount: 39,
-  clobFeatureCount: 48,
-  headVersionSkew: true,
-  lastTrainingStartedAt: "2025-01-01T00:00:00.000Z",
-  lastTrainingCompletedAt: "2025-01-01T00:01:00.000Z",
-  lastValidationWindowStart: "2024-12-30T00:00:00.000Z",
-  lastValidationWindowEnd: "2025-01-01T00:00:00.000Z",
-  trainingSampleCount: 48,
-  validationSampleCount: 12,
-  latestSnapshotAt: "2025-01-01T00:02:00.000Z",
-  liveSnapshotCount: 16,
-  activeMarket: {
-    slug: "btc-up-5m",
-    marketStart: "2025-01-01T00:00:00.000Z",
-    marketEnd: "2025-01-01T00:05:00.000Z",
-    priceToBeat: 100_000,
-    upTokenId: "1",
-    downTokenId: "2",
-  },
-  metrics: {
-    trendRegressionMae: 0.02,
-    trendRegressionRmse: 0.03,
-    trendRegressionHuber: 0.01,
-    trendDirectionMacroF1: 0.66,
-    trendDirectionSupport: { up: 5, flat: 4, down: 3 },
-    clobRegressionMae: 0.03,
-    clobRegressionRmse: 0.04,
-    clobRegressionHuber: 0.02,
-    clobDirectionMacroF1: 0.61,
-    clobDirectionSupport: { up: 6, flat: 3, down: 3 },
-    sampleCount: 12,
-  },
+  currentBlockEndAt: "2025-01-01T00:05:00.000Z",
+  currentBlockStartAt: "2025-01-01T00:00:00.000Z",
+  isLiveReady: true,
+  lastCollectorFromAt: "2025-01-01T00:05:00.000Z",
   lastError: null,
+  lastLiveSnapshotAt: "2025-01-01T00:02:00.000Z",
+  lastPredictionAt: "2025-01-01T00:02:00.000Z",
+  lastPredictionSource: "manual",
+  lastPredictionWasCorrect: null,
+  lastTrainingAt: "2025-01-01T00:01:00.000Z",
+  lastTrainingStatus: "ready",
+  latestPrediction: null,
+  modelFamily: "tcn",
+  rollingCorrectCount: 7,
+  rollingHitRate: 0.7,
+  rollingPredictionCount: 10,
+  state: "idle",
+  trainingCount: 2,
 };
 
-const MODEL_STATUS_PAYLOAD: ModelStatusPayload = {
-  isTrainingCycleRunning: false,
-  lastTrainingCycleAt: "2025-01-01T00:01:00.000Z",
-  models: [MODEL_STATUS],
+const STATUS_PAYLOAD: ModelStatusPayload = {
+  assets: [ASSET_STATUS],
+  isProcessing: false,
+  lastHistoricalBlockCompletedAt: "2025-01-01T00:05:00.000Z",
+};
+
+const PREDICTION_PAYLOAD: ModelPredictionPayload = {
   liveSnapshotCount: 16,
-  latestSnapshotAt: "2025-01-01T00:02:00.000Z",
-};
-
-const MODEL_PREDICTION_PAYLOAD: ModelPredictionPayload = {
-  modelKey: "btc_5m",
-  generatedAt: "2025-01-01T00:02:00.000Z",
-  activeMarket: MODEL_STATUS.activeMarket,
-  trend: {
+  prediction: {
+    actualDirection: null,
+    actualReturn: null,
+    asset: "btc",
+    contextEndAt: "2025-01-01T00:02:00.000Z",
+    contextStartAt: "2025-01-01T00:01:30.000Z",
+    downValueAtPrediction: 0.42,
+    downValueAtTargetEnd: null,
+    errorMessage: null,
+    issuedAt: "2025-01-01T00:02:00.000Z",
+    predictedDirection: "up",
+    predictedProbabilityDown: 0.42,
+    predictedProbabilityUp: 0.58,
     predictedReturn: 0.03,
-    fairUpProbability: 0.58,
-    probabilities: { up: 0.58, flat: 0.24, down: 0.18 },
-    isChainlinkFresh: true,
+    predictionId: "prediction-1",
+    referenceValueAtPrediction: 100_000,
+    referenceValueAtTargetEnd: null,
+    resolvedAt: null,
+    source: "manual",
+    status: "pending",
+    targetEndAt: "2025-01-01T00:02:30.000Z",
+    targetStartAt: "2025-01-01T00:02:00.000Z",
+    upValueAtPrediction: 0.58,
+    upValueAtTargetEnd: null,
+    isCorrect: null,
   },
-  clob: {
-    currentUpMid: 0.53,
-    predictedUpMid: 0.57,
-    edge: 0.04,
-    probabilities: { up: 0.62, flat: 0.2, down: 0.18 },
-    isOrderBookFresh: true,
-  },
-  fusion: {
-    scoreUp: 0.03,
-    scoreDown: null,
-    selectedScore: 0.03,
-    shouldTrade: true,
-    suggestedSide: "up",
-    mode: "full",
-    trendEdgeUp: 0.02,
-    trendEdgeDown: null,
-    clobEdgeUp: 0.04,
-    clobEdgeDown: null,
-    feeRateBpsUp: 25,
-    feeRateBpsDown: null,
-    estimatedFeeUp: 0.004,
-    estimatedFeeDown: null,
-    estimatedSlippageUp: 0.01,
-    estimatedSlippageDown: null,
-    spreadBufferUp: 0.015,
-    spreadBufferDown: null,
-    vetoes: [],
-    reasons: ["positive executable edge"],
-  },
-  liveSnapshotCount: 16,
 };
 
-test("HttpServerService serves status and prediction endpoints", async () => {
+const PREDICTION_RECORD_PAYLOAD: ModelPredictionRecordPayload = {
+  predictions: [PREDICTION_PAYLOAD.prediction],
+};
+
+test("HttpServerService serves crypto asset, prediction, and dashboard endpoints", async () => {
   const fakeRuntime = {
     getStatusPayload(): ModelStatusPayload {
-      return MODEL_STATUS_PAYLOAD;
+      return STATUS_PAYLOAD;
     },
-    getModelStatus(): ModelStatus {
-      return MODEL_STATUS;
+    getAssetStatus(): ModelStatus {
+      return ASSET_STATUS;
+    },
+    getPredictionRecords(): ModelPredictionRecordPayload {
+      return PREDICTION_RECORD_PAYLOAD;
     },
     async predict(): Promise<ModelPredictionPayload> {
-      return MODEL_PREDICTION_PAYLOAD;
+      return PREDICTION_PAYLOAD;
     },
   } as unknown as ModelRuntimeService;
   const httpServerService = new HttpServerService({
@@ -135,12 +103,13 @@ test("HttpServerService serves status and prediction endpoints", async () => {
 
   const rootResponse = await fetch(`http://127.0.0.1:${address.port}/`);
   const dashboardResponse = await fetch(`http://127.0.0.1:${address.port}/dashboard`);
-  const modelsResponse = await fetch(`http://127.0.0.1:${address.port}/models`);
-  const modelResponse = await fetch(`http://127.0.0.1:${address.port}/models/btc/5m`);
+  const assetsResponse = await fetch(`http://127.0.0.1:${address.port}/assets`);
+  const assetResponse = await fetch(`http://127.0.0.1:${address.port}/assets/btc`);
+  const predictionsResponse = await fetch(`http://127.0.0.1:${address.port}/predictions`);
   const predictionResponse = await fetch(`http://127.0.0.1:${address.port}/predict`, {
-    method: "POST",
+    body: JSON.stringify({ asset: "btc" }),
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ asset: "btc", window: "5m" }),
+    method: "POST",
   });
 
   assert.equal(rootResponse.status, 200);
@@ -148,16 +117,16 @@ test("HttpServerService serves status and prediction endpoints", async () => {
   assert.equal(dashboardResponse.status, 200);
   assert.equal(dashboardResponse.headers.get("content-type"), "text/html; charset=utf-8");
   const dashboardHtml = await dashboardResponse.text();
-  assert.equal(dashboardHtml.includes("<title>"), true);
-  assert.equal(dashboardHtml.includes('id="asset"'), true);
-  assert.equal(dashboardHtml.includes('id="window"'), true);
+  assert.equal(dashboardHtml.includes("Recent Predictions"), true);
   assert.equal(dashboardHtml.includes("Predict"), true);
-  assert.equal(modelsResponse.status, 200);
-  assert.deepEqual(await modelsResponse.json(), MODEL_STATUS_PAYLOAD);
-  assert.equal(modelResponse.status, 200);
-  assert.deepEqual(await modelResponse.json(), MODEL_STATUS);
+  assert.equal(assetsResponse.status, 200);
+  assert.deepEqual(await assetsResponse.json(), STATUS_PAYLOAD);
+  assert.equal(assetResponse.status, 200);
+  assert.deepEqual(await assetResponse.json(), ASSET_STATUS);
+  assert.equal(predictionsResponse.status, 200);
+  assert.deepEqual(await predictionsResponse.json(), PREDICTION_RECORD_PAYLOAD);
   assert.equal(predictionResponse.status, 200);
-  assert.deepEqual(await predictionResponse.json(), MODEL_PREDICTION_PAYLOAD);
+  assert.deepEqual(await predictionResponse.json(), PREDICTION_PAYLOAD);
 
   await new Promise<void>((resolve, reject) => {
     server.close((error) => {

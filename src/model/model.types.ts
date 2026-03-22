@@ -4,19 +4,11 @@ export type ModelWindow = "5m" | "15m";
 
 export type ModelKey = `${ModelAsset}_${ModelWindow}`;
 
-export type ModelTrendKey = ModelAsset;
-
-export type ModelClobKey = ModelKey;
-
-export type ModelState = "idle" | "training" | "ready" | "error";
+export type ModelState = "error" | "idle" | "waiting" | "predicting" | "training";
 
 export type ModelFamily = "tcn";
 
 export type ModelExchangeVenue = "binance" | "coinbase" | "kraken" | "okx";
-
-export type ModelBookSide = "up" | "down";
-
-export type ModelDirectionClass = 0 | 1 | 2;
 
 export type FlatSnapshotValue = boolean | number | string | null;
 
@@ -33,42 +25,98 @@ export type CollectorMarketSummary = {
 
 export type ModelPredictionRequest = {
   asset: ModelAsset;
-  window: ModelWindow;
 };
 
 export type ModelDirectionProbability = {
-  up: number;
-  flat: number;
   down: number;
+  up: number;
 };
 
 export type ModelClassSupport = {
-  up: number;
-  flat: number;
   down: number;
+  up: number;
 };
 
 export type ModelHeadMetrics = {
   regressionMae: number | null;
   regressionRmse: number | null;
   regressionHuber: number | null;
-  directionMacroF1: number | null;
+  directionAccuracy: number | null;
   directionSupport: ModelClassSupport;
   sampleCount: number;
 };
 
-export type ModelMetrics = {
-  trendRegressionMae: number | null;
-  trendRegressionRmse: number | null;
-  trendRegressionHuber: number | null;
-  trendDirectionMacroF1: number | null;
-  trendDirectionSupport: ModelClassSupport;
-  clobRegressionMae: number | null;
-  clobRegressionRmse: number | null;
-  clobRegressionHuber: number | null;
-  clobDirectionMacroF1: number | null;
-  clobDirectionSupport: ModelClassSupport;
-  sampleCount: number;
+export type ModelPredictionSource = "automatic" | "manual";
+
+export type ModelPredictionRecordStatus = "error" | "pending" | "resolved";
+
+export type ModelPredictionRecord = {
+  predictionId: string;
+  asset: ModelAsset;
+  source: ModelPredictionSource;
+  status: ModelPredictionRecordStatus;
+  issuedAt: string;
+  resolvedAt: string | null;
+  contextStartAt: string;
+  contextEndAt: string;
+  targetStartAt: string;
+  targetEndAt: string;
+  predictedDirection: "down" | "up";
+  predictedReturn: number;
+  predictedProbabilityUp: number | null;
+  predictedProbabilityDown: number | null;
+  actualDirection: "down" | "up" | null;
+  actualReturn: number | null;
+  isCorrect: boolean | null;
+  referenceValueAtPrediction: number | null;
+  referenceValueAtTargetEnd: number | null;
+  upValueAtPrediction: number | null;
+  downValueAtPrediction: number | null;
+  upValueAtTargetEnd: number | null;
+  downValueAtTargetEnd: number | null;
+  errorMessage: string | null;
+};
+
+export type ModelStatus = {
+  asset: ModelAsset;
+  state: ModelState;
+  modelFamily: ModelFamily;
+  currentBlockStartAt: string | null;
+  currentBlockEndAt: string | null;
+  lastCollectorFromAt: string | null;
+  isLiveReady: boolean;
+  lastLiveSnapshotAt: string | null;
+  trainingCount: number;
+  lastTrainingAt: string | null;
+  lastTrainingStatus: "failed" | "idle" | "ready" | "training";
+  lastPredictionAt: string | null;
+  lastPredictionSource: ModelPredictionSource | null;
+  lastPredictionWasCorrect: boolean | null;
+  rollingHitRate: number | null;
+  rollingPredictionCount: number;
+  rollingCorrectCount: number;
+  latestPrediction: ModelPredictionRecord | null;
+  lastError: string | null;
+};
+
+export type ModelStatusPayload = {
+  isProcessing: boolean;
+  lastHistoricalBlockCompletedAt: string | null;
+  assets: ModelStatus[];
+};
+
+export type ModelPredictionPayload = {
+  prediction: ModelPredictionRecord;
+  liveSnapshotCount: number;
+};
+
+export type ModelPredictionRecordPayload = {
+  predictions: ModelPredictionRecord[];
+};
+
+export type ModelOrderBookLevel = {
+  price: number;
+  size: number;
 };
 
 export type ModelActiveMarket = {
@@ -78,89 +126,6 @@ export type ModelActiveMarket = {
   priceToBeat: number | null;
   upTokenId: string | null;
   downTokenId: string | null;
-};
-
-export type ModelStatus = {
-  modelKey: ModelKey;
-  asset: ModelAsset;
-  window: ModelWindow;
-  state: ModelState;
-  modelFamily: ModelFamily;
-  version: number;
-  trendModelKey: ModelTrendKey;
-  trendVersion: number;
-  clobVersion: number;
-  trendSequenceLength: number;
-  clobSequenceLength: number;
-  trendFeatureCount: number;
-  clobFeatureCount: number;
-  headVersionSkew: boolean;
-  lastTrainingStartedAt: string | null;
-  lastTrainingCompletedAt: string | null;
-  lastValidationWindowStart: string | null;
-  lastValidationWindowEnd: string | null;
-  trainingSampleCount: number;
-  validationSampleCount: number;
-  latestSnapshotAt: string | null;
-  liveSnapshotCount: number;
-  activeMarket: ModelActiveMarket | null;
-  metrics: ModelMetrics;
-  lastError: string | null;
-};
-
-export type ModelStatusPayload = {
-  isTrainingCycleRunning: boolean;
-  lastTrainingCycleAt: string | null;
-  models: ModelStatus[];
-  liveSnapshotCount: number;
-  latestSnapshotAt: string | null;
-};
-
-export type ModelPredictionPayload = {
-  modelKey: ModelKey;
-  generatedAt: string;
-  activeMarket: ModelActiveMarket | null;
-  trend: {
-    predictedReturn: number;
-    fairUpProbability: number | null;
-    probabilities: ModelDirectionProbability;
-    isChainlinkFresh: boolean;
-  };
-  clob: {
-    currentUpMid: number | null;
-    predictedUpMid: number;
-    edge: number | null;
-    probabilities: ModelDirectionProbability;
-    isOrderBookFresh: boolean;
-  };
-  fusion: {
-    scoreUp: number | null;
-    scoreDown: number | null;
-    selectedScore: number | null;
-    shouldTrade: boolean;
-    suggestedSide: "up" | "down" | "none";
-    mode: "full" | "clob_only";
-    trendEdgeUp: number | null;
-    trendEdgeDown: number | null;
-    clobEdgeUp: number | null;
-    clobEdgeDown: number | null;
-    feeRateBpsUp: number | null;
-    feeRateBpsDown: number | null;
-    estimatedFeeUp: number | null;
-    estimatedFeeDown: number | null;
-    estimatedSlippageUp: number | null;
-    estimatedSlippageDown: number | null;
-    spreadBufferUp: number | null;
-    spreadBufferDown: number | null;
-    vetoes: string[];
-    reasons: string[];
-  };
-  liveSnapshotCount: number;
-};
-
-export type ModelOrderBookLevel = {
-  price: number;
-  size: number;
 };
 
 export type ModelExchangeVenueContext = {
@@ -234,61 +199,23 @@ export type ModelSnapshotContext = {
 };
 
 export type ModelFeatureNames = {
-  trendFeatures: string[];
-  clobFeatures: string[];
+  cryptoFeatures: string[];
 };
 
-export type ModelTrendInput = {
-  trendKey: ModelTrendKey;
+export type ModelCryptoInput = {
   asset: ModelAsset;
   decisionTime: number;
   latestSnapshotAt: number;
-  trendSequence: number[][];
+  cryptoSequence: number[][];
   currentChainlinkPrice: number | null;
   currentExchangePrice: number | null;
   realizedVolatility30s: number;
   isChainlinkFresh: boolean;
 };
 
-export type ModelClobInput = {
-  modelKey: ModelClobKey;
-  asset: ModelAsset;
-  window: ModelWindow;
-  decisionTime: number;
-  latestSnapshotAt: number;
-  activeMarket: ModelActiveMarket | null;
-  clobSequence: number[][];
-  currentUpMid: number | null;
-  currentUpBid: number | null;
-  currentUpAsk: number | null;
-  currentDownMid: number | null;
-  currentDownBid: number | null;
-  currentDownAsk: number | null;
-  currentChainlinkPrice: number | null;
-  currentExchangePrice: number | null;
-  realizedVolatility30s: number;
-  isChainlinkFresh: boolean;
-  isOrderBookFresh: boolean;
-  upTokenId: string | null;
-  downTokenId: string | null;
-  upBidLevels: ModelOrderBookLevel[];
-  upAskLevels: ModelOrderBookLevel[];
-  downBidLevels: ModelOrderBookLevel[];
-  downAskLevels: ModelOrderBookLevel[];
-};
-
-export type ModelPredictionInput = {
-  trendInput: ModelTrendInput;
-  clobInput: ModelClobInput;
-};
-
-export type ModelTrendSample = ModelTrendInput & {
-  trendTarget: number | null;
-};
-
-export type ModelClobSample = ModelClobInput & {
-  clobTarget: number | null;
-  clobDirectionTarget: number | null;
+export type ModelCryptoSample = ModelCryptoInput & {
+  targetDirection: "down" | "up";
+  targetReturn: number;
 };
 
 export type ModelTensorflowArchitecture = {
@@ -306,45 +233,33 @@ export type ModelHeadArtifact = {
   featureNames: string[];
   featureMedians: number[];
   featureScales: number[];
-  classWeights: [number, number, number];
-  directionThreshold: number;
+  classWeights: [number, number];
   architecture: ModelTensorflowArchitecture;
-  targetEncoding: "identity" | "logit_probability";
   metrics: ModelHeadMetrics;
 };
 
-export type ModelTrendArtifact = {
-  trendKey: ModelTrendKey;
+export type ModelArtifact = {
+  asset: ModelAsset;
   remoteModelId: string;
   version: number;
   trainedAt: string;
   trainingSampleCount: number;
   validationSampleCount: number;
-  lastTrainWindowStart: string | null;
-  lastTrainWindowEnd: string | null;
   lastValidationWindowStart: string | null;
   lastValidationWindowEnd: string | null;
   model: ModelHeadArtifact;
 };
 
-export type ModelClobArtifact = {
-  modelKey: ModelClobKey;
-  asset: ModelAsset;
-  window: ModelWindow;
-  remoteModelId: string;
-  version: number;
-  trainedAt: string;
-  trainingSampleCount: number;
-  validationSampleCount: number;
-  lastTrainWindowStart: string | null;
-  lastTrainWindowEnd: string | null;
-  lastValidationWindowStart: string | null;
-  lastValidationWindowEnd: string | null;
-  model: ModelHeadArtifact;
+export type ModelRuntimeStateAssetSnapshot = {
+  lastCollectorFromAt: string | null;
+  lastProcessedBlockStartAt: string | null;
+  lastProcessedBlockEndAt: string | null;
+  recentPredictionRecords: ModelPredictionRecord[];
+  rollingPredictionOutcomes: boolean[];
 };
 
 export type ModelRuntimeStateSnapshot = {
   schemaVersion: number;
-  lastTrainingCycleAt: string | null;
-  lastTrainedSnapshotAt: string | null;
+  assets: Record<ModelAsset, ModelRuntimeStateAssetSnapshot>;
+  lastHistoricalBlockCompletedAt: string | null;
 };

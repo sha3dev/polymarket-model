@@ -1,6 +1,13 @@
 # @sha3/polymarket-model
 
-Long-running Node service that watches crypto prices and Polymarket order books, trains short-horizon models through a remote `tensorflow-api`, and exposes an HTTP API plus an operator dashboard.
+Crypto-only long-running Node service that:
+
+- reads historical snapshots from the collector in contiguous 5-minute blocks
+- makes one automatic prediction from the first 30 seconds of each block
+- scores that prediction on the following 30 seconds
+- trains a remote model in `tensorflow-api` with that 5-minute block
+- keeps a live in-memory snapshot buffer through `@sha3/polymarket-snapshot`
+- exposes a dashboard and HTTP API for live manual predictions
 
 ## TL;DR
 
@@ -11,69 +18,75 @@ TENSORFLOW_API_URL=http://192.168.1.2:3100 \
 npm run start
 ```
 
-Then open:
+Open:
 
 ```bash
 open http://127.0.0.1:3200/dashboard
 ```
 
-Run a prediction:
+Manual prediction:
 
 ```bash
 curl -X POST http://127.0.0.1:3200/predict \
   -H 'content-type: application/json' \
-  -d '{"asset":"btc","window":"5m"}'
+  -d '{"asset":"btc"}'
 ```
 
 ## Why
 
-This service tries to answer one practical question:
+This service answers a much narrower question than the previous trend+CLOB runtime:
 
-"Given the live crypto price and the live Polymarket book, is the current market price attractive enough to trade right now?"
+> “Given only the crypto market stream, can we predict whether the price will go up or down over the next 30 seconds?”
 
-It does that with two separate model families:
+The system now ignores Polymarket order books entirely.
 
-- A trend model predicts where the underlying crypto reference price is likely to move over the next 30 seconds.
-- A CLOB model predicts where the Polymarket UP-token midpoint is likely to move over the next 30 seconds.
+It works in two parallel modes:
 
-The service then combines both views, subtracts realistic costs, and returns a decision payload.
+- historical automatic mode
+  - uses closed 5-minute blocks from the collector
+  - makes one prediction from the first 30 seconds
+  - checks whether that prediction was right on the next 30 seconds
+  - then trains the model with the full block
+- live manual mode
+  - keeps the most recent real-time snapshots in memory
+  - lets an operator press `Predict` in the dashboard
+  - scores that live prediction 30 seconds later
 
-This repository is not an order executor. It is a decision engine and model runtime.
+The result is a simple crypto-direction training and evaluation runtime.
 
 ## Main Capabilities
 
-- Trend model per asset for `btc`, `eth`, `sol`, and `xrp`
-- CLOB model per market for every `asset/window` pair such as `btc_5m` or `eth_15m`
-- Continuous catch-up training from the beginning of collector history
-- Live inference on the newest buffered snapshots
-- Remote TensorFlow execution through `tensorflow-api`
-- Built-in operator dashboard at `GET /dashboard`
-- Cost-aware trade scoring with spread, slippage, liquidity, and fee vetoes
+- one crypto model per asset: `btc`, `eth`, `sol`, `xrp`
+- historical catch-up that resumes from the last persisted collector cursor
+- automatic prediction before training on every closed 5-minute block
+- live manual prediction from the newest snapshots in memory
+- rolling hit-rate over the last 20 resolved predictions per asset
+- remote training and inference through `tensorflow-api`
+- compact operator dashboard at `GET /dashboard`
 
-### Strategy in plain language
+### Strategy In Plain Language
 
-The service keeps two separate views of the same market:
+Each historical cycle uses a block of 5 minutes of market data.
 
-- The trend model looks at the broader crypto tape.
-- The CLOB model looks at the local Polymarket microstructure.
+Inside that block:
 
-The final score is not just "what does the model predict?" It is:
+1. look only at the first 30 seconds
+2. ask the model whether the price is likely to go up or down in the next 30 seconds
+3. compare that guess with what actually happened in those next 30 seconds
+4. record correct or incorrect
+5. train the model with the full 5-minute block
 
-- what the trend model implies for fair UP probability,
-- what the CLOB model implies for the UP midpoint,
-- what the current book lets you actually execute,
-- what fees and slippage will cost,
-- whether the remaining edge is still worth taking.
+This makes the automatic prediction genuinely “before training on that block”.
 
-That is why `shouldTrade` can be `false` even when one of the models looks directionally strong.
+For manual predictions, the same idea is used, but the input comes from the live real-time buffer instead of a closed historical block.
 
 ## Setup
 
-The service expects:
+The service needs:
 
-1. A snapshot collector that serves historical snapshots.
-2. A reachable `tensorflow-api` deployment that stores and trains models.
-3. A writable local state directory for the runtime cursor.
+1. a snapshot collector with historical `/snapshots`
+2. a reachable `tensorflow-api` deployment
+3. a writable local directory for runtime state
 
 Typical real-network settings:
 
@@ -90,7 +103,7 @@ Install dependencies:
 npm install
 ```
 
-Run the verification gate:
+Run the full gate:
 
 ```bash
 npm run check
@@ -98,29 +111,28 @@ npm run check
 
 ## Running Locally
 
-Start the service:
-
 ```bash
 SNAPSHOT_COLLECTOR_URL=http://192.168.1.2:3000 \
 TENSORFLOW_API_URL=http://192.168.1.2:3100 \
 npm run start
 ```
 
-Default local port:
+Default port:
 
 - `http://127.0.0.1:3200`
 
-Useful endpoints:
+Useful routes:
 
-- dashboard: `GET /dashboard`
-- info: `GET /`
-- model status: `GET /models`
-- one model: `GET /models/:asset/:window`
-- prediction: `POST /predict`
+- `GET /`
+- `GET /dashboard`
+- `GET /assets`
+- `GET /assets/:asset`
+- `GET /predictions`
+- `POST /predict`
 
 ## Usage
 
-### From code
+### From Code
 
 ```ts
 import { ServiceRuntime } from "@sha3/polymarket-model";
@@ -129,14 +141,13 @@ const runtime = ServiceRuntime.createDefault();
 await runtime.startServer();
 ```
 
-### From the dashboard
+### From The Dashboard
 
-1. Start the service.
-2. Open `/dashboard`.
-3. Wait for model cards to move from `training` to `ready`.
-4. Pick an asset and window.
-5. Press `Predict`.
-6. Read the trend block, CLOB block, fusion scores, vetoes, and reasons.
+1. start the service
+2. open `/dashboard`
+3. wait until an asset row shows `Live Ready`
+4. press `Predict` for that asset
+5. watch the recent predictions table move from `pending` to `resolved`
 
 ## Examples
 
@@ -146,35 +157,31 @@ Read service info:
 curl http://127.0.0.1:3200/
 ```
 
-Read all model states:
+Read asset states:
 
 ```bash
-curl http://127.0.0.1:3200/models
+curl http://127.0.0.1:3200/assets
 ```
 
-Read one model:
+Read one asset:
 
 ```bash
-curl http://127.0.0.1:3200/models/btc/5m
+curl http://127.0.0.1:3200/assets/btc
 ```
 
-Run one prediction:
+Read recent predictions:
+
+```bash
+curl http://127.0.0.1:3200/predictions
+```
+
+Run one manual live prediction:
 
 ```bash
 curl -X POST http://127.0.0.1:3200/predict \
   -H 'content-type: application/json' \
-  -d '{"asset":"btc","window":"5m"}'
+  -d '{"asset":"btc"}'
 ```
-
-Read the result:
-
-- `trend.predictedReturn`: predicted log-return of the underlying asset over the horizon
-- `trend.fairUpProbability`: trend forecast translated into a fair UP probability
-- `clob.predictedUpMid`: predicted future midpoint of the UP token
-- `clob.edge`: predicted midpoint minus current midpoint
-- `fusion.scoreUp` / `fusion.scoreDown`: cost-aware edge scores
-- `fusion.shouldTrade`: final yes/no decision
-- `fusion.vetoes`: exact reasons the trade was blocked
 
 ## Public API
 
@@ -190,22 +197,14 @@ It wires:
 
 - collector access
 - live snapshot buffering
-- feature extraction
+- crypto feature extraction
 - remote TensorFlow transport
-- runtime cursor persistence
+- runtime-state persistence
 - HTTP server
 
 #### `buildServer()`
 
 Builds the HTTP server without binding a port.
-
-Routes:
-
-- `GET /`
-- `GET /dashboard`
-- `GET /models`
-- `GET /models/:asset/:window`
-- `POST /predict`
 
 #### `start(): Promise<void>`
 
@@ -214,11 +213,10 @@ Starts the runtime without binding the HTTP listener.
 It:
 
 - checks `tensorflow-api` reachability
-- restores the local runtime cursor
-- restores remote ready models
-- starts the live snapshot store
-- runs an initial training cycle
-- schedules periodic retraining
+- restores local runtime state
+- restores remote crypto models
+- starts the live snapshot buffer
+- starts the historical processing loop
 
 #### `startServer(): Promise<void>`
 
@@ -232,7 +230,10 @@ Stops the HTTP server and runtime resources.
 
 Returned by `GET /`.
 
-Contains the top-level service identity payload, including the service name and the simple health-style `ok` flag.
+Contains:
+
+- `ok`
+- `serviceName`
 
 ### `ModelPredictionRequest`
 
@@ -241,300 +242,184 @@ Request body for `POST /predict`.
 Fields:
 
 - `asset`: one of `btc`, `eth`, `sol`, `xrp`
-- `window`: one of `5m`, `15m`
+
+### `ModelPredictionRecord`
+
+The canonical record for one prediction, whether automatic or manual.
+
+Important fields:
+
+- `predictionId`
+- `asset`
+- `source`
+- `status`
+- `issuedAt`
+- `targetStartAt`
+- `targetEndAt`
+- `predictedDirection`
+- `predictedReturn`
+- `predictedProbabilityUp`
+- `predictedProbabilityDown`
+- `actualDirection`
+- `actualReturn`
+- `isCorrect`
+- `upValueAtPrediction`
+- `downValueAtPrediction`
+- `upValueAtTargetEnd`
+- `downValueAtTargetEnd`
+
+### `ModelPredictionRecordPayload`
+
+Returned by `GET /predictions`.
+
+Contains:
+
+- `predictions`: newest-first recent prediction records
 
 ### `ModelPredictionPayload`
 
-Response body for `POST /predict`.
+Returned by `POST /predict`.
 
 Contains:
 
-- `activeMarket`
-- `trend`
-- `clob`
-- `fusion`
-- `generatedAt`
-- `liveSnapshotCount`
-- `modelKey`
-
-It is the main inference contract of the package.
+- `prediction`: the created manual prediction record
+- `liveSnapshotCount`: how many live snapshots were currently buffered
 
 ### `ModelStatus`
 
-One model-status record from `GET /models` or `GET /models/:asset/:window`.
+Per-asset runtime status returned by `GET /assets` and `GET /assets/:asset`.
 
-Contains:
+Important fields:
 
-- model identity fields
-- head versions
-- sequence lengths
-- feature counts
-- training and validation counts
-- active market information
-- metrics
-- last error
-- `headVersionSkew`
+- `asset`
+- `state`
+- `currentBlockStartAt`
+- `currentBlockEndAt`
+- `lastCollectorFromAt`
+- `isLiveReady`
+- `lastLiveSnapshotAt`
+- `trainingCount`
+- `lastTrainingAt`
+- `lastTrainingStatus`
+- `lastPredictionAt`
+- `lastPredictionSource`
+- `lastPredictionWasCorrect`
+- `rollingHitRate`
+- `rollingPredictionCount`
+- `rollingCorrectCount`
+- `latestPrediction`
+- `lastError`
 
 ### `ModelStatusPayload`
 
-Response body for `GET /models`.
+Returned by `GET /assets`.
 
 Contains:
 
-- `isTrainingCycleRunning`
-- `lastTrainingCycleAt`
-- `latestSnapshotAt`
-- `liveSnapshotCount`
-- `models`
+- `isProcessing`
+- `lastHistoricalBlockCompletedAt`
+- `assets`
 
 ## HTTP API
 
 ### `GET /`
 
-Returns basic service information.
+Returns the basic service info payload.
 
 ### `GET /dashboard`
 
-Returns the built-in operator dashboard HTML.
+Returns the built-in HTML dashboard.
 
-### `GET /models`
+### `GET /assets`
 
-Returns:
+Returns global runtime state:
 
-- whether a training cycle is running
-- last training cycle time
-- latest live snapshot time
-- live snapshot count
-- one status record per `asset/window`
+- whether the service is currently processing historical work
+- last completed historical block
+- per-asset status
 
-Each model status includes:
+### `GET /assets/:asset`
 
-- trend and CLOB versions
-- feature counts
-- sequence lengths
-- active market details
-- training and validation counts
-- latest metrics
-- `headVersionSkew`
+Returns one asset status.
 
-`headVersionSkew` means trend and CLOB heads were trained at different times or versions. This is informational. It does not block inference by itself.
+### `GET /predictions`
 
-### `GET /models/:asset/:window`
-
-Returns the status for one market key.
+Returns recent prediction records across all assets.
 
 ### `POST /predict`
 
-Request:
+Runs a manual live prediction using the latest real-time snapshots already buffered in memory.
 
-```json
-{
-  "asset": "btc",
-  "window": "5m"
-}
-```
+Error cases:
 
-Response contains:
-
-- active market context
-- trend prediction
-- CLOB prediction
-- fusion decision
-- live snapshot count
+- asset is invalid
+- no trained model exists for that asset yet
+- live buffer does not contain enough recent context yet
 
 ## Runtime Flow
 
-### High-level runtime
+### Historical Automatic Flow
 
-The service has two external dependencies:
+For each asset:
 
-- the snapshot collector for historical data
-- `tensorflow-api` for training and inference
+1. read the persisted collector cursor `lastCollectorFromAt`
+2. define the next closed 5-minute block
+3. request that block from the collector
+4. use the first 30 seconds to build one prediction context
+5. run one automatic prediction
+6. score that prediction on the immediately following 30 seconds
+7. append the result to the rolling hit-rate buffer
+8. build training samples from the full 5-minute block
+9. send only that block to `tensorflow-api`
+10. persist the next collector cursor
 
-Node keeps all strategy logic locally:
+### Live Manual Flow
 
-- snapshot merging
-- feature extraction
-- target construction
-- preprocessing statistics
-- label thresholds
-- class weights
-- validation metrics
-- fusion and veto logic
+In parallel, the service keeps a real-time buffer through `@sha3/polymarket-snapshot`.
 
-Remote TensorFlow keeps:
+When you press `Predict`:
 
-- model definitions
-- trained weights
-- training execution
-- prediction execution
-- remote model metadata
+1. the latest live snapshots are trimmed to the required context window
+2. the current asset model runs on that live context
+3. a `manual` prediction record is created with status `pending`
+4. after 30 seconds, the service checks the realized outcome
+5. the record becomes `resolved` or `error`
 
-### Startup flow
+### What A Prediction Means
 
-On startup the service:
-
-1. checks that `tensorflow-api` is reachable
-2. restores local runtime state:
-   - `lastTrainingCycleAt`
-   - `lastTrainedSnapshotAt`
-3. reads existing remote models from `tensorflow-api`
-4. restores ready models into in-memory registries
-5. starts the live snapshot stream
-6. starts the first training cycle in the background
-7. schedules future retraining
-
-### Historical catch-up flow
-
-The training loop does not request many days of history in one collector call.
-
-Instead it:
-
-1. reads `lastTrainedSnapshotAt`
-2. asks the collector for one page starting at that cursor
-3. trains on that page plus the minimum overlap needed for sequences and horizon
-4. persists the new cursor
-5. requests the next page
-6. repeats until it reaches the present
-
-Important consequences:
-
-- first boot can train from the beginning of available history
-- catch-up is incremental and resumable
-- the service does not need a huge single historical request
-
-### Snapshot preparation
-
-Raw snapshots are resampled into 500 ms buckets.
-
-If a bucket is missing, the previous snapshot is carried forward. This produces a regular time grid, which the sequence models need.
-
-Decision timestamps are then sampled at `MODEL_DECISION_INTERVAL_MS`, which defaults to 30 seconds.
-
-### Sequence lengths
-
-Trend sequence lengths:
-
-- `btc`: 180 steps
-- `eth`: 180 steps
-- `sol`: 180 steps
-- `xrp`: 180 steps
-
-At 500 ms resampling, `180` steps means a 90-second sequence.
-
-CLOB sequence lengths:
-
-- `*_5m`: 96 steps
-- `*_15m`: 128 steps
-
-At 500 ms resampling:
-
-- `96` steps is 48 seconds
-- `128` steps is 64 seconds
-
-### Training order
-
-Each catch-up pass trains in this order:
-
-1. trend models for each asset
-2. CLOB models for each `asset/window`
-3. persist runtime cursor
-4. refresh status
-
-### Validation split
-
-Training uses the full accumulated sample history for that head, sorted by time.
-
-The newest tail is held out for validation:
-
-- validation size = `max(1, floor(sampleCount * 0.2))`
-- training = older `80%`
-- validation = newest `20%`
-
-This is a simple chronological holdout, not a walk-forward embargo scheme.
-
-## Training Data And Targets
-
-### Trend training samples
-
-One trend sample is built per:
-
-- supported asset
-- decision timestamp
-
-The target is:
-
-- future 30-second log-return of the Chainlink price
-
-Exact rule:
-
-- current and future Chainlink values must both exist
-- both must be considered fresh
-- target = `log(future_chainlink / current_chainlink)`
-
-If those conditions are not met, the sample is dropped.
-
-### CLOB training samples
-
-One CLOB sample is built per:
-
-- supported asset
-- supported window
-- decision timestamp
-
-There are two targets:
-
-1. Regression target:
-   `logit(future_up_mid)`
-2. Classification target:
-   `future_up_mid - current_up_mid`
-
-The CLOB target is only valid when:
-
-- a current active market exists
-- a future active market exists
-- current UP midpoint exists
-- future UP midpoint exists
-- the future order book is fresh
-
-### Direction labels
-
-Both trend and CLOB use a 3-class direction head:
+The prediction is binary:
 
 - `up`
-- `flat`
 - `down`
 
-Labels come from a thresholded version of the regression target:
+The service still keeps a continuous predicted return and a probability split:
 
-- threshold = `max(minimumThreshold, median(abs(targets)) * 0.5)`
+- `Pred Up`
+- `Pred Down`
 
-Minimum thresholds:
+The final realized outcome is shown as:
 
-- trend: `0.0001`
-- CLOB direction: `0.0025`
+- `Final Up = 1`, `Final Down = 0` if the market went up
+- `Final Up = 0`, `Final Down = 1` if the market went down
 
-Class mapping:
+### Training Data, Features, And Targets
 
-- `up` if target > threshold
-- `flat` if `-threshold <= target <= threshold`
-- `down` if target < -threshold
+#### What Is One Training Example?
 
-### Sample weighting
+One training example is:
 
-Classification uses inverse-frequency-style class weights with a floor:
+- a sequence of recent crypto market features
+- plus the realized future return 30 seconds later
 
-- class weight = `max(0.25, maxClassSupport / classSupport)`
+It is not a single raw snapshot.
 
-Regression uses uniform sample weights of `1`.
+#### How Snapshots Become Features
 
-## Features
+Raw collector snapshots are first resampled to `500ms` buckets.
 
-### Trend features
+Then the crypto feature builder creates a fixed-length sequence from the recent context window.
 
-Trend features are asset-level only. They deliberately do not use Polymarket-specific market timing or `priceToBeat`.
-
-The full trend feature set is:
+Current crypto features used:
 
 - `cl_log_px`
 - `cl_stale_s`
@@ -576,481 +461,225 @@ The full trend feature set is:
 - `cl_update_recent_60s`
 - `ex_valid_gate_flag`
 
-Plain-language groups:
+#### What Is The Target?
 
-- Chainlink state and freshness
-- Exchange returns and realized volatility
-- Cross-venue premiums and book quality
-- Exchange spread, depth, and imbalance
-- Cross-asset leader and breadth signals
-- Shock signals from BTC and ETH
+For a decision taken at time `T`:
 
-### CLOB features
+- context uses the 30 seconds immediately before `T`
+- target uses the next 30 seconds after `T`
 
-CLOB features mix market microstructure with asset context and fair-value hints.
+The target return is:
 
-The full CLOB feature set is:
+```text
+log(price(T + 30s) / price(T))
+```
 
-- `up_mid`
-- `up_spread`
-- `up_imb1`
-- `up_imb3`
-- `up_depth3_log`
-- `up_depth1_log`
-- `up_stale_s`
-- `up_mid_chg_5s`
-- `up_spread_chg_5s`
-- `up_imb3_chg_5s`
-- `down_mid`
-- `down_spread`
-- `down_imb1`
-- `down_imb3`
-- `down_depth3_log`
-- `down_depth1_log`
-- `down_stale_s`
-- `down_mid_chg_5s`
-- `parity_gap`
-- `spread_sum`
-- `net_imb3`
-- `mid_skew`
-- `tick_size`
-- `min_order_size`
-- `neg_risk_flag`
-- `book_hash_change`
-- `t_to_end_norm`
-- `t_from_start_norm`
-- `ptb_missing`
-- `moneyness_log_cl`
-- `moneyness_log_ex`
-- `ex_rv_30s`
-- `fair_q_up`
-- `mispricing_mid`
-- `mispricing_ask`
-- `mispricing_bid`
-- `leader_ret_5s`
-- `leader_ret_15s`
-- `breadth_pm_parity`
-- `breadth_pm_midup`
-- `disp_pm_midup`
-- `up_down_stale_max`
-- `up_down_stale_diff`
-- `spread_up_gt_10c`
-- `spread_dn_gt_10c`
-- `midpoint_vs_displayed_up`
-- `midpoint_vs_displayed_dn`
-- `pm_live_flag`
+Direction label:
 
-Plain-language groups:
+- `up` if target return > 0
+- `down` otherwise
 
-- UP and DOWN book midpoints, spreads, depths, and imbalances
-- Relative shape between UP and DOWN books
-- Market timing within the 5-minute or 15-minute event
-- Price-to-beat and moneyness
-- Fair-probability and mispricing signals
-- Cross-market Polymarket breadth and dispersion
-- Staleness and displayed-vs-midpoint diagnostics
+#### Which Price Is Used?
 
-### Cross-asset leader logic
+The runtime prefers fresh Chainlink price when available.
+If Chainlink is stale, it falls back to the aggregated exchange price built from the exchange order books inside the snapshot.
 
-Leader signals are not a single hard-coded leader asset. They are weighted cross-asset signals.
+#### How Many Examples Come From One 5-Minute Block?
 
-Current weights:
+The block is not turned into exactly one training sample.
 
-- For `btc`: `eth=0.2`, `sol=0.05`, `xrp=0.05`
-- For `eth`: `btc=0.6`, `sol=0.1`, `xrp=0.1`
-- For `sol`: `btc=0.6`, `eth=0.3`, `xrp=0.1`
-- For `xrp`: `btc=0.6`, `eth=0.25`, `sol=0.15`
+Inside the 5-minute block, the feature service can create multiple decision points spaced by the prediction context interval.
 
-Shock features are sourced from fixed assets:
+So one block can produce several training examples, each one still meaning:
 
-- `btc_shock` uses BTC
-- `eth_shock` uses ETH
+- recent sequence
+- future 30-second outcome
 
-## Preprocessing
+#### Validation
 
-The service fits preprocessing on training samples only.
+Within the block payload sent to training:
 
-For each feature:
+- the earlier samples become the training split
+- the last fraction becomes the validation split
 
-1. compute median
-2. compute MAD-based scale:
-   `max(1.4826 * MAD, 1e-8)`
-3. scale each value:
-   `(value - median) / scale`
-4. clamp scaled values into `[-10, 10]`
+Validation is used to compute:
 
-Missing numeric values are treated as `0` before scaling.
-
-The fitted medians, scales, thresholds, class weights, and metrics are stored in remote model metadata.
-
-## Model Architecture
-
-Both heads use a Keras functional TCN-style architecture built in TypeScript and executed remotely by `tensorflow-api`.
-
-Shared structure:
-
-- input tensor shaped `[sequenceLength, featureCount]`
-- dense stem
-- residual `Conv1D` blocks
-- causal dilations
-- dropout
-- global average pooling
-- dense trunk
-- two named outputs:
-  - `regression`
-  - `classification`
-
-Compile choices:
-
-- optimizer: Adam
-- regression loss: Huber
-- classification loss: categorical cross-entropy from logits
-
-Architecture is keyed separately for:
-
-- each trend asset
-- each CLOB `asset/window`
-
-## Training Through `tensorflow-api`
-
-For each training block this service:
-
-1. builds sequences locally
-2. builds targets locally
-3. fits preprocessing locally
-4. scales train and validation sequences locally
-5. builds class labels and sample weights locally
-6. sends the prepared tensors to `tensorflow-api`
-7. waits for the remote training job
-8. runs remote validation prediction
-9. computes validation metrics locally
-10. stores metadata back in the remote model record
-
-Remote model ids:
-
-- trend: `polymarket_model_trend_<asset>`
-- CLOB: `polymarket_model_clob_<asset>_<window>`
-
-The remote service is the source of truth for:
-
-- model records
-- model artifacts
-- model metadata
-
-Local persistence only stores:
-
-- `lastTrainingCycleAt`
-- `lastTrainedSnapshotAt`
-
-## Inference Flow
-
-Prediction is live-only. It uses the newest buffered snapshots in memory.
-
-Steps:
-
-1. Build one trend input and one CLOB input from the latest live snapshots.
-2. Scale each sequence using the medians and scales stored in the trained artifact metadata.
-3. Call remote prediction on the trend model.
-4. Call remote prediction on the CLOB model.
-5. Decode outputs:
-   - trend regression stays in identity space
-   - CLOB regression is decoded from logit-probability back to probability
-6. Build fusion scores and vetoes locally.
-
-### Trend inference output
-
-Trend returns:
-
-- regression prediction: future log-return
-- class probabilities: `up`, `flat`, `down`
-- fair UP probability derived from the predicted return
-
-### CLOB inference output
-
-CLOB returns:
-
-- regression prediction: future UP midpoint probability
-- class probabilities: `up`, `flat`, `down`
-- midpoint edge versus current UP midpoint
-
-### Fusion logic
-
-Fusion compares both heads against executable market conditions.
-
-Inputs include:
-
-- fair trend probability
-- predicted UP midpoint
-- current UP midpoint
-- effective execution prices from order book depth
-- spread buffers
-- estimated fees
-- estimated slippage
-- freshness checks
-- liquidity checks
-
-The fee estimate uses:
-
-- `feeRate = feeRateBps / 10_000`
-- `curve = (p * (1 - p))^2`
-- `estimatedFee = executionSize * p * feeRate * curve`
-
-The service can fall back to `clob_only` mode if configured, but the default behavior is still the full fused decision.
+- regression MAE
+- regression RMSE
+- regression Huber
+- binary direction accuracy
 
 ## Configuration
 
-Every top-level key exported by `src/config.ts` is listed below.
-
-### Service and HTTP
+Every top-level config key exported by `src/config.ts`:
 
 - `RESPONSE_CONTENT_TYPE`
-  default: `application/json`
+  - HTTP JSON content type
 - `DEFAULT_PORT`
-  default: `3200`
+  - listener port
 - `SERVICE_NAME`
-  default: `@sha3/polymarket-model`
-
-### Local runtime state
-
+  - service label shown in API and dashboard
 - `MODEL_STATE_PATH`
-  optional explicit state path
+  - optional legacy alias for runtime state location
 - `MODEL_STATE_DIR`
-  default: `./var/model-state`
+  - base directory for persisted runtime state
 - `MODEL_STATE_TMP_DIR`
-  optional temporary directory override
-
-### Collector
-
+  - temp directory for atomic runtime-state writes
 - `SNAPSHOT_COLLECTOR_URL`
-  default: `http://127.0.0.1:3000`
+  - collector base URL
 - `SNAPSHOT_COLLECTOR_CACHE_TTL_MS`
-  default: `2000`
+  - cache TTL for collector requests
 - `SNAPSHOT_COLLECTOR_PAGE_LIMIT`
-  default: `1000`
+  - maximum collector page size
 - `SNAPSHOT_COLLECTOR_REQUEST_TIMEOUT_MS`
-  default: `30000`
+  - per-attempt collector timeout
 - `SNAPSHOT_COLLECTOR_MAX_ATTEMPTS`
-  default: `4`
+  - max collector retry attempts
 - `SNAPSHOT_COLLECTOR_RETRY_BASE_DELAY_MS`
-  default: `250`
-
-### Live snapshots
-
+  - base backoff for collector retries
 - `LIVE_SNAPSHOT_INTERVAL_MS`
-  default: `500`
+  - polling cadence used by `polymarket-snapshot`
 - `LIVE_SNAPSHOT_BUFFER_LIMIT`
-  default: `1024`
-
-### Supported markets
-
+  - max live snapshots kept in memory
 - `MODEL_SUPPORTED_ASSETS`
-  default: `btc,eth,sol,xrp`
-- `MODEL_SUPPORTED_WINDOWS`
-  default: `5m,15m`
-
-### Training schedule and sample generation
-
-- `MODEL_TRAINING_INTERVAL_MS`
-  default: `86400000`
-- `MODEL_DECISION_INTERVAL_MS`
-  default: `30000`
+  - supported crypto assets
+- `MODEL_PROCESS_INTERVAL_MS`
+  - cadence for the historical processing loop
+- `MODEL_BLOCK_DURATION_MS`
+  - historical block length, default 5 minutes
+- `MODEL_PREDICTION_CONTEXT_MS`
+  - size of the context window used for prediction
+- `MODEL_PREDICTION_TARGET_MS`
+  - future horizon used for scoring and target construction
 - `MODEL_PREDICTION_HORIZON_MS`
-  default: `30000`
+  - compatibility alias used by some internal feature utilities
+- `MODEL_DECISION_INTERVAL_MS`
+  - compatibility alias aligned with the context interval
+- `MODEL_ROLLING_HIT_RATE_SIZE`
+  - size of the rolling resolved-prediction window
 - `MODEL_CHAINLINK_STALE_MS`
-  default: `60000`
-- `MODEL_POLYMARKET_STALE_MS`
-  default: `15000`
+  - maximum age for Chainlink values to be treated as fresh
 - `MODEL_MIN_SAMPLE_COUNT`
-  default: `12`
+  - minimum number of training samples required to train a block
 - `MODEL_RESTORE_ON_START`
-  default: `true`
+  - whether runtime state and remote model metadata should be restored on boot
 - `MODEL_LOG_TRAINING_PROGRESS`
-  default: `true`
-
-### Cost and fusion
-
-- `MODEL_FEE_CACHE_TTL_MS`
-  default: `30000`
-- `MODEL_FEE_REQUEST_TIMEOUT_MS`
-  default: `1500`
-- `MODEL_FEE_MAX_ATTEMPTS`
-  default: `3`
-- `MODEL_FEE_RETRY_BASE_DELAY_MS`
-  default: `200`
-- `MODEL_MAX_SPREAD`
-  default: `0.1`
-- `MODEL_SPREAD_BUFFER_KAPPA`
-  default: `0.75`
-- `MODEL_FUSION_ALPHA_0`
-  default: `0.2`
-- `MODEL_FUSION_ALPHA_1`
-  default: `0.6`
-- `MODEL_VETO_DOWN_THRESHOLD`
-  default: `0.7`
-- `MODEL_ENABLE_CLOB_ONLY_FALLBACK`
-  default: `true`
-- `MODEL_EXECUTION_SIZE`
-  default: `25`
-
-### Remote TensorFlow
-
+  - whether to log training completion lines
 - `MODEL_TF_EPOCHS`
-  default: `25`
+  - epochs per remote training job
 - `MODEL_TF_BATCH_SIZE`
-  default: `32`
+  - batch size per remote training job
 - `MODEL_TF_LEARNING_RATE`
-  default: `0.01`
+  - learning rate for remote model creation
 - `TENSORFLOW_API_URL`
-  default: `http://127.0.0.1:3100`
+  - remote TensorFlow service base URL
 - `TENSORFLOW_API_AUTH_TOKEN`
-  default: empty
+  - optional bearer token
 - `TENSORFLOW_API_REQUEST_TIMEOUT_MS`
-  default: `30000`
+  - per-attempt `tensorflow-api` timeout
 - `TENSORFLOW_API_MAX_ATTEMPTS`
-  default: `4`
+  - max retry attempts for `tensorflow-api`
 - `TENSORFLOW_API_RETRY_BASE_DELAY_MS`
-  default: `250`
+  - base retry backoff for `tensorflow-api`
 - `TENSORFLOW_API_TRAIN_POLL_INTERVAL_MS`
-  default: `2000`
+  - interval used to poll remote training job status
 - `TENSORFLOW_API_TRAIN_TIMEOUT_MS`
-  default: `1200000`
+  - maximum training-job wait time
 
 ## Compatibility
 
-Supported runtime model:
+This is a breaking refactor from the old trend+CLOB/fusion service.
 
-- Node/TypeScript service in this repo
-- external `tensorflow-api` service
-- external snapshot collector
+What changed:
 
-Current market universe:
+- `window` is gone from public prediction requests
+- `/models` and `/models/:asset/:window` are replaced by `/assets` and `/assets/:asset`
+- `fusion` payloads are gone
+- CLOB training, CLOB prediction, and Polymarket execution logic are gone
 
-- assets: `btc`, `eth`, `sol`, `xrp`
-- windows: `5m`, `15m`
+What stayed:
 
-Expected remote contract from `tensorflow-api`:
-
-- `GET /`
-- `GET /api/models`
-- `GET /api/models/:modelId`
-- `POST /api/models`
-- `PATCH /api/models/:modelId/metadata`
-- `POST /api/models/:modelId/training-jobs`
-- `POST /api/models/:modelId/prediction-jobs`
-- `GET /api/jobs/:jobId`
-- `GET /api/jobs/:jobId/result`
+- remote `tensorflow-api` training and prediction
+- local runtime-state persistence
+- built-in dashboard
+- `ServiceRuntime` as the public package entrypoint
 
 ## Scripts
 
-- `npm run start`
-  start the service directly from TypeScript
-- `npm run build`
-  compile to `dist`
 - `npm run standards:check`
-  run standards verification
+  - project structure and standards verification
 - `npm run lint`
-  run Biome checks
-- `npm run format:check`
-  run formatting checks
+  - biome linting
+- `npm run format`
+  - biome formatting
 - `npm run typecheck`
-  run TypeScript without emit
-- `npm run test`
-  run the Node test suite
+  - TypeScript compile check
+- `npm test`
+  - node:test suite
 - `npm run check`
-  run the full gate
-- `npm run fix`
-  apply Biome write fixes
+  - final blocking gate
 
 ## Structure
 
+Main folders:
+
 - `src/app`
-  runtime composition and package entrypoint
+  - runtime bootstrap
 - `src/http`
-  HTTP server
+  - HTTP routes
 - `src/dashboard`
-  operator dashboard HTML
-- `src/model`
-  features, preprocessing, training orchestration, runtime, and fusion
-- `src/tensorflow-api`
-  remote TensorFlow transport and model-definition builder
+  - operator dashboard HTML
 - `src/collector`
-  collector client with retry and pagination
+  - collector client
 - `src/snapshot`
-  live snapshot buffering
+  - live real-time snapshot buffer
+- `src/model`
+  - crypto feature extraction, runtime orchestration, training, and persistence
+- `src/tensorflow-api`
+  - remote TensorFlow transport and model definition builder
 - `test`
-  Node test suite
+  - node:test coverage
 
 ## Troubleshooting
 
-### Models stay in `training`
+### `no trained model available for <asset>`
+
+The service has not completed a successful remote training cycle for that asset yet.
+
+### `insufficient live context for <asset>`
+
+The live buffer does not yet contain enough recent snapshots to build the prediction context window.
+
+### Asset stuck in `waiting`
+
+The next historical 5-minute block is not closed yet, or the collector has not made it available yet.
+
+### Asset in `error`
 
 Check:
 
-- `GET /models`
-- logs from this service
-- logs from `tensorflow-api`
+- collector availability
+- `tensorflow-api` availability
+- remote training job errors
+- malformed snapshot payloads
 
-Common causes:
+### Dashboard shows `pending` predictions for too long
 
-- remote model creation delay
-- remote training job timeout
-- remote TensorFlow runtime error
-
-### Models stay in `error`
-
-Inspect:
-
-- `lastError` in `GET /models`
-- `GET /api/jobs/:jobId` on `tensorflow-api`
-
-### `shouldTrade` is always `false`
-
-This is often normal. Check:
-
-- `fusion.vetoes`
-- `fusion.reasons`
-- `trend.isChainlinkFresh`
-- `clob.isOrderBookFresh`
-- fee-rate availability
-- market liquidity and spread
-
-### `headVersionSkew` is `true`
-
-This means trend and CLOB heads were refreshed at different times. That is expected under independent head training.
-
-### Training is too slow on first boot
-
-Reduce workload temporarily:
-
-```bash
-SNAPSHOT_COLLECTOR_PAGE_LIMIT=250 \
-MODEL_TF_EPOCHS=5 \
-npm run start
-```
-
-### `tensorflow-api` contract mismatch
-
-If remote training or metadata update fails, verify that your deployment supports the endpoints listed in the Compatibility section.
+That means the target 30-second window has not yet been fully observed or enough live snapshots are not yet available to resolve it.
 
 ## AI Workflow
 
-When changing strategy or runtime behavior:
+When changing this repo:
 
-1. update code
-2. update tests for observable behavior
-3. update this README so the documented pipeline still matches the code
-4. run:
+1. read `AGENTS.md`
+2. run `npm run standards:check`
+3. implement the change
+4. run `npm run typecheck`
+5. run `npm test`
+6. run `npm run check`
 
-```bash
-npm run standards:check
-npm run check
-```
+When changing runtime behavior, update:
 
-For upstream debugging of `tensorflow-api`, reproduce with a real local run of this service against the remote collector and remote TensorFlow API, then capture:
-
-- the failing model id
-- the failing job id
-- the `GET /api/jobs/:jobId` payload
-- the `GET /models` payload
-
-That is the fastest way to separate a strategy bug in this repo from a transport or runtime bug in `tensorflow-api`.
+- tests under `test/`
+- the dashboard help text
+- the `Runtime Flow` and `Configuration` sections in this README

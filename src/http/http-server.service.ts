@@ -16,7 +16,7 @@ import { AppInfoService } from "../app-info/app-info.service.ts";
 import config from "../config.ts";
 import { DashboardService } from "../dashboard/dashboard.service.ts";
 import logger from "../logger.ts";
-import type { ModelAsset, ModelPredictionRequest, ModelWindow } from "../model/model.types.ts";
+import type { ModelAsset, ModelPredictionRequest } from "../model/model.types.ts";
 import { ModelRuntimeService } from "../model/model-runtime.service.ts";
 
 /**
@@ -61,11 +61,12 @@ export class HttpServerService {
    */
 
   public static createDefault(): HttpServerService {
-    return new HttpServerService({
+    const httpServerService = new HttpServerService({
       appInfoService: AppInfoService.createDefault(),
       dashboardService: DashboardService.createDefault(),
       modelRuntimeService: ModelRuntimeService.createDefault(),
     });
+    return httpServerService;
   }
 
   /**
@@ -89,27 +90,17 @@ export class HttpServerService {
     return isAsset;
   }
 
-  private isWindow(value: string): value is ModelWindow {
-    const isWindow = (config.MODEL_SUPPORTED_WINDOWS as string[]).includes(value);
-    return isWindow;
-  }
-
-  private validateAssetWindow(asset: string, window: string): { asset: ModelAsset; window: ModelWindow } | null {
-    const validatedAssetWindow = this.isAsset(asset) && this.isWindow(window) ? { asset, window } : null;
-    return validatedAssetWindow;
-  }
-
   private parsePredictionRequest(rawPayload: unknown): ModelPredictionRequest | null {
     let predictionRequest: ModelPredictionRequest | null = null;
 
     if (rawPayload !== null && typeof rawPayload === "object") {
       const rawRecord = rawPayload as Record<string, unknown>;
       const rawAsset = typeof rawRecord.asset === "string" ? rawRecord.asset : "";
-      const rawWindow = typeof rawRecord.window === "string" ? rawRecord.window : "";
-      const validatedAssetWindow = this.validateAssetWindow(rawAsset, rawWindow);
 
-      if (validatedAssetWindow !== null) {
-        predictionRequest = validatedAssetWindow;
+      if (this.isAsset(rawAsset)) {
+        predictionRequest = {
+          asset: rawAsset,
+        };
       }
     }
 
@@ -117,25 +108,30 @@ export class HttpServerService {
   }
 
   private handleRootRequest(context: Context): Response {
-    return this.respondJson(this.appInfoService.buildPayload(), context, 200);
+    const response = this.respondJson(this.appInfoService.buildPayload(), context, 200);
+    return response;
   }
 
-  private handleModelsRequest(context: Context): Response {
-    return this.respondJson(this.modelRuntimeService.getStatusPayload(), context, 200);
+  private handleAssetsRequest(context: Context): Response {
+    const response = this.respondJson(this.modelRuntimeService.getStatusPayload(), context, 200);
+    return response;
+  }
+
+  private handlePredictionsRequest(context: Context): Response {
+    const response = this.respondJson(this.modelRuntimeService.getPredictionRecords(), context, 200);
+    return response;
   }
 
   private handleDashboardRequest(context: Context): Response {
-    return this.respondHtml(this.dashboardService.buildHtml(), context, 200);
+    const response = this.respondHtml(this.dashboardService.buildHtml(), context, 200);
+    return response;
   }
 
-  private handleModelRequest(context: Context): Response {
+  private handleAssetRequest(context: Context): Response {
     const asset = context.req.param("asset") || "";
-    const window = context.req.param("window") || "";
-    const validatedAssetWindow = this.validateAssetWindow(asset, window);
-    const response =
-      validatedAssetWindow === null
-        ? this.respondJson({ error: "invalid model key" }, context, 400)
-        : this.respondJson(this.modelRuntimeService.getModelStatus(validatedAssetWindow.asset, validatedAssetWindow.window), context, 200);
+    const response = !this.isAsset(asset)
+      ? this.respondJson({ error: "invalid asset" }, context, 400)
+      : this.respondJson(this.modelRuntimeService.getAssetStatus(asset), context, 200);
     return response;
   }
 
@@ -164,15 +160,17 @@ export class HttpServerService {
    */
 
   public getModelRuntimeService(): ModelRuntimeService {
-    return this.modelRuntimeService;
+    const modelRuntimeService = this.modelRuntimeService;
+    return modelRuntimeService;
   }
 
   public buildServer(): ServerType {
     const app = new Hono();
     app.get("/", (context) => this.handleRootRequest(context));
     app.get("/dashboard", (context) => this.handleDashboardRequest(context));
-    app.get("/models", (context) => this.handleModelsRequest(context));
-    app.get("/models/:asset/:window", (context) => this.handleModelRequest(context));
+    app.get("/assets", (context) => this.handleAssetsRequest(context));
+    app.get("/assets/:asset", (context) => this.handleAssetRequest(context));
+    app.get("/predictions", (context) => this.handlePredictionsRequest(context));
     app.post("/predict", async (context) => this.handlePredictRequest(context));
     const server = createAdaptorServer({ fetch: app.fetch });
     return server;

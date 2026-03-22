@@ -32,7 +32,7 @@ test("TensorflowApiClientService sends remote requests with optional bearer auth
     definition: {
       compileConfig: {
         loss: {},
-        metrics: [],
+        metrics: {},
         optimizer: {},
       },
       format: "keras-functional",

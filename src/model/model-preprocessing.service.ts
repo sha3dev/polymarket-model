@@ -2,7 +2,7 @@
  * @section imports:internals
  */
 
-import type { ModelClobSample, ModelDirectionClass, ModelDirectionProbability, ModelHeadMetrics, ModelTrendSample } from "./model.types.ts";
+import type { ModelCryptoSample, ModelDirectionProbability, ModelHeadMetrics } from "./model.types.ts";
 
 /**
  * @section consts
@@ -16,10 +16,9 @@ const MIN_CLASS_WEIGHT = 0.25;
  */
 
 type ModelSampleWeightPayload = {
-  classWeights: [number, number, number];
-  labels: ModelDirectionClass[];
+  classWeights: [number, number];
+  labels: Array<0 | 1>;
   sampleWeights: number[];
-  threshold: number;
 };
 
 /**
@@ -67,24 +66,9 @@ export class ModelPreprocessingService {
     return absoluteDeviations;
   }
 
-  private buildThreshold(targets: number[], minimumThreshold: number): number {
-    const absoluteTargets = targets.map((target) => Math.abs(target));
-    const threshold = Math.max(minimumThreshold, this.buildMedian(absoluteTargets) * 0.5);
-    return threshold;
-  }
-
-  private classifyValue(value: number, threshold: number): ModelDirectionClass {
-    let directionClass: ModelDirectionClass = 1;
-
-    if (value > threshold) {
-      directionClass = 0;
-    }
-
-    if (value < -threshold) {
-      directionClass = 2;
-    }
-
-    return directionClass;
+  private buildDirectionLabel(target: number): 0 | 1 {
+    const directionLabel: 0 | 1 = target > 0 ? 1 : 0;
+    return directionLabel;
   }
 
   /**
@@ -120,41 +104,28 @@ export class ModelPreprocessingService {
     return scaledSequences;
   }
 
-  public buildDirectionLabeling(targets: number[], minimumThreshold: number): ModelSampleWeightPayload {
-    const threshold = this.buildThreshold(targets, minimumThreshold);
-    const labels = targets.map((target) => this.classifyValue(target, threshold));
-    const support = [labels.filter((label) => label === 0).length, labels.filter((label) => label === 1).length, labels.filter((label) => label === 2).length];
+  public buildDirectionLabeling(targets: number[]): ModelSampleWeightPayload {
+    const labels = targets.map((target) => this.buildDirectionLabel(target));
+    const support: [number, number] = [labels.filter((label) => label === 0).length, labels.filter((label) => label === 1).length];
     const maximumSupport = Math.max(...support, 1);
-    const classWeights = support.map((count) => Math.max(MIN_CLASS_WEIGHT, maximumSupport / Math.max(count, 1))) as [number, number, number];
+    const classWeights = support.map((count) => Math.max(MIN_CLASS_WEIGHT, maximumSupport / Math.max(count, 1))) as [number, number];
     const sampleWeights = labels.map((label) => classWeights[label] || 1);
     const sampleWeightPayload: ModelSampleWeightPayload = {
       classWeights,
       labels,
       sampleWeights,
-      threshold,
     };
     return sampleWeightPayload;
   }
 
-  public buildOneHotTargets(labels: ModelDirectionClass[]): number[][] {
-    const oneHotTargets = labels.map((label) => [label === 0 ? 1 : 0, label === 1 ? 1 : 0, label === 2 ? 1 : 0]);
+  public buildOneHotTargets(labels: Array<0 | 1>): number[][] {
+    const oneHotTargets = labels.map((label) => [label === 0 ? 1 : 0, label === 1 ? 1 : 0]);
     return oneHotTargets;
   }
 
   public buildRegressionTargets(targets: number[]): number[][] {
     const regressionTargets = targets.map((target) => [target]);
     return regressionTargets;
-  }
-
-  public decodeRegressionValue(value: number, targetEncoding: "identity" | "logit_probability"): number {
-    let decodedValue = value;
-
-    if (targetEncoding === "logit_probability") {
-      const clippedValue = this.clamp(value, -20, 20);
-      decodedValue = 1 / (1 + Math.exp(-clippedValue));
-    }
-
-    return decodedValue;
   }
 
   public buildProbabilities(logits: number[]): ModelDirectionProbability {
@@ -164,53 +135,28 @@ export class ModelPreprocessingService {
     const probabilities: ModelDirectionProbability =
       denominator > 0
         ? {
-            up: (exponentials[0] || 0) / denominator,
-            flat: (exponentials[1] || 0) / denominator,
-            down: (exponentials[2] || 0) / denominator,
+            down: (exponentials[0] || 0) / denominator,
+            up: (exponentials[1] || 0) / denominator,
           }
-        : { up: 0, flat: 0, down: 0 };
+        : { down: 0, up: 0 };
     return probabilities;
   }
 
   public buildHeadMetrics(
-    predictions: Array<{ predictedValue: number; probabilities: ModelDirectionProbability }>,
+    predictions: Array<{ predictedReturn: number; probabilities: ModelDirectionProbability }>,
     targets: number[],
-    labels: ModelDirectionClass[],
-    threshold: number,
+    labels: Array<0 | 1>,
   ): ModelHeadMetrics {
-    const errors = predictions.map((prediction, predictionIndex) => prediction.predictedValue - (targets[predictionIndex] || 0));
-    const predictedLabels = predictions.map((prediction) => {
-      let predictedLabel: ModelDirectionClass = 1;
-
-      if (
-        prediction.probabilities.up >= Math.max(prediction.probabilities.flat, prediction.probabilities.down) &&
-        prediction.probabilities.up >= Math.min(0.5 + threshold, 0.95)
-      ) {
-        predictedLabel = 0;
-      }
-
-      if (
-        prediction.probabilities.down >= Math.max(prediction.probabilities.flat, prediction.probabilities.up) &&
-        prediction.probabilities.down >= Math.min(0.5 + threshold, 0.95)
-      ) {
-        predictedLabel = 2;
-      }
-
-      return predictedLabel;
-    });
-    const macroF1 = [0, 1, 2].reduce((sum, labelClass) => {
-      const truePositive = labels.filter((label, index) => label === labelClass && predictedLabels[index] === labelClass).length;
-      const falsePositive = labels.filter((label, index) => label !== labelClass && predictedLabels[index] === labelClass).length;
-      const falseNegative = labels.filter((label, index) => label === labelClass && predictedLabels[index] !== labelClass).length;
-      const precision = truePositive + falsePositive === 0 ? 0 : truePositive / (truePositive + falsePositive);
-      const recall = truePositive + falseNegative === 0 ? 0 : truePositive / (truePositive + falseNegative);
-      const f1 = precision + recall === 0 ? 0 : (2 * precision * recall) / (precision + recall);
-      return sum + f1 / 3;
-    }, 0);
+    const errors = predictions.map((prediction, predictionIndex) => prediction.predictedReturn - (targets[predictionIndex] || 0));
+    const predictedLabels = predictions.map((prediction) => (prediction.probabilities.up >= prediction.probabilities.down ? 1 : 0));
+    const correctCount = labels.filter((label, predictionIndex) => label === predictedLabels[predictionIndex]).length;
     const sampleCount = targets.length;
     const metrics: ModelHeadMetrics = {
-      regressionMae: sampleCount === 0 ? null : errors.reduce((sum, error) => sum + Math.abs(error), 0) / sampleCount,
-      regressionRmse: sampleCount === 0 ? null : Math.sqrt(errors.reduce((sum, error) => sum + error * error, 0) / sampleCount),
+      directionAccuracy: sampleCount === 0 ? null : correctCount / sampleCount,
+      directionSupport: {
+        down: labels.filter((label) => label === 0).length,
+        up: labels.filter((label) => label === 1).length,
+      },
       regressionHuber:
         sampleCount === 0
           ? null
@@ -218,24 +164,15 @@ export class ModelPreprocessingService {
               const absoluteError = Math.abs(error);
               return sum + (absoluteError <= HUBER_DELTA ? 0.5 * absoluteError * absoluteError : HUBER_DELTA * (absoluteError - 0.5 * HUBER_DELTA));
             }, 0) / sampleCount,
-      directionMacroF1: macroF1,
-      directionSupport: {
-        up: labels.filter((label) => label === 0).length,
-        flat: labels.filter((label) => label === 1).length,
-        down: labels.filter((label) => label === 2).length,
-      },
+      regressionMae: sampleCount === 0 ? null : errors.reduce((sum, error) => sum + Math.abs(error), 0) / sampleCount,
+      regressionRmse: sampleCount === 0 ? null : Math.sqrt(errors.reduce((sum, error) => sum + error * error, 0) / sampleCount),
       sampleCount,
     };
     return metrics;
   }
 
-  public buildTrendSequences(samples: ModelTrendSample[]): number[][][] {
-    const trendSequences = samples.map((sample) => sample.trendSequence);
-    return trendSequences;
-  }
-
-  public buildClobSequences(samples: ModelClobSample[]): number[][][] {
-    const clobSequences = samples.map((sample) => sample.clobSequence);
-    return clobSequences;
+  public buildCryptoSequences(samples: ModelCryptoSample[]): number[][][] {
+    const cryptoSequences = samples.map((sample) => sample.cryptoSequence);
+    return cryptoSequences;
   }
 }

@@ -25,6 +25,7 @@ import type {
 
 const EXCHANGE_NAMES = ["binance", "coinbase", "kraken", "okx"] as const;
 const DEFAULT_MIN_ORDER_SIZE = 1;
+const DEFAULT_POLYMARKET_STALE_MS = 15_000;
 const DEFAULT_TICK_SIZE = 0.01;
 
 /**
@@ -99,9 +100,9 @@ export class ModelContextService {
   public static createDefault(): ModelContextService {
     const modelContextService = new ModelContextService({
       supportedAssets: config.MODEL_SUPPORTED_ASSETS as ModelAsset[],
-      supportedWindows: config.MODEL_SUPPORTED_WINDOWS as ModelWindow[],
+      supportedWindows: [],
       chainlinkStaleMs: config.MODEL_CHAINLINK_STALE_MS,
-      polymarketStaleMs: config.MODEL_POLYMARKET_STALE_MS,
+      polymarketStaleMs: DEFAULT_POLYMARKET_STALE_MS,
     });
     return modelContextService;
   }

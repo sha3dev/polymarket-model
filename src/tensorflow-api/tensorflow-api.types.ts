@@ -10,7 +10,7 @@ import type { ModelDirectionProbability, ModelHeadArtifact, ModelTensorflowArchi
 
 export type TensorflowApiCompileConfig = {
   loss: Record<string, unknown>;
-  metrics: string[];
+  metrics: Record<string, unknown>;
   optimizer: Record<string, unknown>;
 };
 
@@ -99,25 +99,21 @@ export type TensorflowApiPredictionResponse = {
 
 export type TensorflowApiHeadMetadata = {
   architecture: ModelTensorflowArchitecture;
-  classWeights: [number, number, number];
-  directionThreshold: number;
+  classWeights: [number, number];
   featureMedians: number[];
   featureNames: string[];
   featureScales: number[];
-  lastTrainWindowEnd: string | null;
-  lastTrainWindowStart: string | null;
   lastValidationWindowEnd: string | null;
   lastValidationWindowStart: string | null;
   logicalKey: string;
-  logicalModelType: "clob" | "trend";
+  logicalModelType: "crypto";
   metrics: ModelHeadArtifact["metrics"];
-  targetEncoding: "identity" | "logit_probability";
   trainedAt: string;
   trainingSampleCount: number;
   validationSampleCount: number;
 };
 
 export type TensorflowApiDecodedPrediction = {
-  predictedValue: number;
+  predictedReturn: number;
   probabilities: ModelDirectionProbability;
 };

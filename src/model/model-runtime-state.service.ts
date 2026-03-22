@@ -12,13 +12,13 @@ import * as path from "node:path";
 
 import config from "../config.ts";
 import logger from "../logger.ts";
-import type { ModelRuntimeStateSnapshot } from "./model.types.ts";
+import type { ModelAsset, ModelPredictionRecord, ModelRuntimeStateAssetSnapshot, ModelRuntimeStateSnapshot } from "./model.types.ts";
 
 /**
  * @section consts
  */
 
-const RUNTIME_STATE_SCHEMA_VERSION = 1;
+const RUNTIME_STATE_SCHEMA_VERSION = 2;
 
 /**
  * @section types
@@ -26,6 +26,7 @@ const RUNTIME_STATE_SCHEMA_VERSION = 1;
 
 type ModelRuntimeStateServiceOptions = {
   stateDirectoryPath: string;
+  supportedAssets: ModelAsset[];
   temporaryDirectoryPath: string;
 };
 
@@ -40,6 +41,8 @@ export class ModelRuntimeStateService {
 
   private readonly stateDirectoryPath: string;
 
+  private readonly supportedAssets: ModelAsset[];
+
   private readonly temporaryDirectoryPath: string;
 
   /**
@@ -48,6 +51,7 @@ export class ModelRuntimeStateService {
 
   public constructor(options: ModelRuntimeStateServiceOptions) {
     this.stateDirectoryPath = options.stateDirectoryPath;
+    this.supportedAssets = options.supportedAssets;
     this.temporaryDirectoryPath = options.temporaryDirectoryPath;
   }
 
@@ -59,6 +63,7 @@ export class ModelRuntimeStateService {
     const temporaryDirectoryPath = config.MODEL_STATE_TMP_DIR.length === 0 ? path.join(config.MODEL_STATE_DIR, "tmp") : config.MODEL_STATE_TMP_DIR;
     const modelRuntimeStateService = new ModelRuntimeStateService({
       stateDirectoryPath: config.MODEL_STATE_DIR,
+      supportedAssets: config.MODEL_SUPPORTED_ASSETS as ModelAsset[],
       temporaryDirectoryPath,
     });
     return modelRuntimeStateService;
@@ -78,6 +83,98 @@ export class ModelRuntimeStateService {
     return legacyManifestPath;
   }
 
+  private buildDefaultAssetState(): ModelRuntimeStateAssetSnapshot {
+    const assetState: ModelRuntimeStateAssetSnapshot = {
+      lastCollectorFromAt: null,
+      lastProcessedBlockEndAt: null,
+      lastProcessedBlockStartAt: null,
+      recentPredictionRecords: [],
+      rollingPredictionOutcomes: [],
+    };
+    return assetState;
+  }
+
+  private buildEmptyState(): ModelRuntimeStateSnapshot {
+    const assets = this.supportedAssets.reduce<Record<ModelAsset, ModelRuntimeStateAssetSnapshot>>(
+      (assetMap, asset) => {
+        assetMap[asset] = this.buildDefaultAssetState();
+        return assetMap;
+      },
+      {} as Record<ModelAsset, ModelRuntimeStateAssetSnapshot>,
+    );
+    const runtimeStateSnapshot: ModelRuntimeStateSnapshot = {
+      assets,
+      lastHistoricalBlockCompletedAt: null,
+      schemaVersion: RUNTIME_STATE_SCHEMA_VERSION,
+    };
+    return runtimeStateSnapshot;
+  }
+
+  private buildPredictionRecord(rawRecord: unknown): ModelPredictionRecord | null {
+    const record = rawRecord as ModelPredictionRecord;
+    const isValidRecord =
+      typeof record?.predictionId === "string" &&
+      typeof record.asset === "string" &&
+      typeof record.source === "string" &&
+      typeof record.status === "string" &&
+      typeof record.issuedAt === "string";
+    const predictionRecord = isValidRecord ? record : null;
+    return predictionRecord;
+  }
+
+  private buildAssetState(rawRecord: unknown): ModelRuntimeStateAssetSnapshot {
+    const record = rawRecord as Record<string, unknown>;
+    const recentPredictionRecords = Array.isArray(record?.recentPredictionRecords)
+      ? record.recentPredictionRecords.map((entry) => this.buildPredictionRecord(entry)).filter((entry) => entry !== null)
+      : [];
+    const rollingPredictionOutcomes = Array.isArray(record?.rollingPredictionOutcomes)
+      ? record.rollingPredictionOutcomes.filter((entry) => typeof entry === "boolean")
+      : [];
+    const assetState: ModelRuntimeStateAssetSnapshot = {
+      lastCollectorFromAt: typeof record?.lastCollectorFromAt === "string" ? record.lastCollectorFromAt : null,
+      lastProcessedBlockEndAt: typeof record?.lastProcessedBlockEndAt === "string" ? record.lastProcessedBlockEndAt : null,
+      lastProcessedBlockStartAt: typeof record?.lastProcessedBlockStartAt === "string" ? record.lastProcessedBlockStartAt : null,
+      recentPredictionRecords,
+      rollingPredictionOutcomes: rollingPredictionOutcomes as boolean[],
+    };
+    return assetState;
+  }
+
+  private parseStateRecord(rawRecord: Record<string, unknown>): ModelRuntimeStateSnapshot | null {
+    const schemaVersion = typeof rawRecord.schemaVersion === "number" ? rawRecord.schemaVersion : null;
+    const rawAssets = rawRecord.assets as Record<string, unknown> | undefined;
+    let runtimeStateSnapshot: ModelRuntimeStateSnapshot | null = null;
+
+    if (schemaVersion === RUNTIME_STATE_SCHEMA_VERSION && rawAssets !== undefined) {
+      const assets = this.supportedAssets.reduce<Record<ModelAsset, ModelRuntimeStateAssetSnapshot>>(
+        (assetMap, asset) => {
+          assetMap[asset] = this.buildAssetState(rawAssets[asset]);
+          return assetMap;
+        },
+        {} as Record<ModelAsset, ModelRuntimeStateAssetSnapshot>,
+      );
+      runtimeStateSnapshot = {
+        assets,
+        lastHistoricalBlockCompletedAt: typeof rawRecord.lastHistoricalBlockCompletedAt === "string" ? rawRecord.lastHistoricalBlockCompletedAt : null,
+        schemaVersion,
+      };
+    }
+
+    return runtimeStateSnapshot;
+  }
+
+  private parseLegacyManifest(rawRecord: Record<string, unknown>): ModelRuntimeStateSnapshot | null {
+    const hasLegacyShape = Array.isArray(rawRecord.trendModels) && Array.isArray(rawRecord.clobModels);
+    let runtimeStateSnapshot: ModelRuntimeStateSnapshot | null = null;
+
+    if (hasLegacyShape) {
+      runtimeStateSnapshot = this.buildEmptyState();
+      logger.info(`restored empty crypto runtime state from legacy manifest path=${this.buildLegacyManifestPath()}`);
+    }
+
+    return runtimeStateSnapshot;
+  }
+
   private async ensureBaseDirectories(): Promise<void> {
     await mkdir(this.stateDirectoryPath, { recursive: true });
     await mkdir(this.temporaryDirectoryPath, { recursive: true });
@@ -85,42 +182,6 @@ export class ModelRuntimeStateService {
 
   private async writeJsonFile(filePath: string, payload: unknown): Promise<void> {
     await writeFile(filePath, JSON.stringify(payload, null, 2), "utf8");
-  }
-
-  private buildEmptyState(): ModelRuntimeStateSnapshot {
-    const runtimeStateSnapshot: ModelRuntimeStateSnapshot = {
-      lastTrainingCycleAt: null,
-      lastTrainedSnapshotAt: null,
-      schemaVersion: RUNTIME_STATE_SCHEMA_VERSION,
-    };
-    return runtimeStateSnapshot;
-  }
-
-  private parseStateRecord(rawRecord: Record<string, unknown>): ModelRuntimeStateSnapshot | null {
-    const schemaVersion = typeof rawRecord.schemaVersion === "number" ? rawRecord.schemaVersion : null;
-    const lastTrainingCycleAt = typeof rawRecord.lastTrainingCycleAt === "string" ? rawRecord.lastTrainingCycleAt : null;
-    const lastTrainedSnapshotAt = typeof rawRecord.lastTrainedSnapshotAt === "string" ? rawRecord.lastTrainedSnapshotAt : null;
-    const runtimeStateSnapshot =
-      schemaVersion === RUNTIME_STATE_SCHEMA_VERSION
-        ? {
-            lastTrainingCycleAt,
-            lastTrainedSnapshotAt,
-            schemaVersion,
-          }
-        : null;
-    return runtimeStateSnapshot;
-  }
-
-  private parseLegacyManifest(rawRecord: Record<string, unknown>): ModelRuntimeStateSnapshot | null {
-    const hasLegacyShape = Array.isArray(rawRecord.trendModels) && Array.isArray(rawRecord.clobModels);
-    const runtimeStateSnapshot = hasLegacyShape
-      ? {
-          lastTrainingCycleAt: typeof rawRecord.lastTrainingCycleAt === "string" ? rawRecord.lastTrainingCycleAt : null,
-          lastTrainedSnapshotAt: typeof rawRecord.lastTrainedSnapshotAt === "string" ? rawRecord.lastTrainedSnapshotAt : null,
-          schemaVersion: RUNTIME_STATE_SCHEMA_VERSION,
-        }
-      : null;
-    return runtimeStateSnapshot;
   }
 
   /**
@@ -144,23 +205,17 @@ export class ModelRuntimeStateService {
         const parsedLegacyState = this.parseLegacyManifest(rawRecord);
 
         if (parsedLegacyState !== null) {
-          logger.info(`restored runtime cursor from legacy manifest path=${this.buildLegacyManifestPath()}`);
           runtimeStateSnapshot = parsedLegacyState;
         }
       } else {
-        logger.info(`runtime state not found at ${runtimeStatePath}, starting without persisted cursor`);
+        logger.info(`runtime state not found at ${runtimeStatePath}, starting without persisted crypto cursor`);
       }
     }
 
     return runtimeStateSnapshot;
   }
 
-  public async persistState(lastTrainingCycleAt: string | null, lastTrainedSnapshotAt: string | null): Promise<void> {
-    const runtimeStateSnapshot: ModelRuntimeStateSnapshot = {
-      lastTrainingCycleAt,
-      lastTrainedSnapshotAt,
-      schemaVersion: RUNTIME_STATE_SCHEMA_VERSION,
-    };
+  public async persistState(runtimeStateSnapshot: ModelRuntimeStateSnapshot): Promise<void> {
     const temporaryRuntimeStatePath = path.join(this.temporaryDirectoryPath, "runtime-state.tmp.json");
 
     await this.ensureBaseDirectories();

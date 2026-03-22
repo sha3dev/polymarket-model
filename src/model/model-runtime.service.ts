@@ -1,4 +1,10 @@
 /**
+ * @section imports:externals
+ */
+
+import { randomUUID } from "node:crypto";
+
+/**
  * @section imports:internals
  */
 
@@ -9,23 +15,28 @@ import { SnapshotStoreService } from "../snapshot/snapshot-store.service.ts";
 import type { TensorflowApiHeadMetadata, TensorflowApiModelRecord } from "../tensorflow-api/tensorflow-api.types.ts";
 import type {
   FlatSnapshot,
+  ModelArtifact,
   ModelAsset,
-  ModelClobArtifact,
-  ModelClobKey,
-  ModelMetrics,
-  ModelPredictionInput,
+  ModelDirectionProbability,
   ModelPredictionPayload,
+  ModelPredictionRecord,
+  ModelPredictionRecordPayload,
   ModelPredictionRequest,
+  ModelRuntimeStateAssetSnapshot,
+  ModelRuntimeStateSnapshot,
   ModelStatus,
   ModelStatusPayload,
-  ModelTrendArtifact,
-  ModelTrendKey,
-  ModelWindow,
 } from "./model.types.ts";
-import { ModelCostService } from "./model-cost.service.ts";
 import { ModelFeatureService } from "./model-feature.service.ts";
 import { ModelRuntimeStateService } from "./model-runtime-state.service.ts";
 import { ModelTrainingService } from "./model-training.service.ts";
+
+/**
+ * @section consts
+ */
+
+const UNIX_EPOCH_ISO = "1970-01-01T00:00:00.000Z";
+const RECENT_PREDICTION_LIMIT = 100;
 
 /**
  * @section types
@@ -33,19 +44,16 @@ import { ModelTrainingService } from "./model-training.service.ts";
 
 type ModelRuntimeServiceOptions = {
   collectorClientService: CollectorClientService;
-  modelCostService: ModelCostService;
   modelFeatureService: ModelFeatureService;
   modelRuntimeStateService: ModelRuntimeStateService;
   modelTrainingService: ModelTrainingService;
+  processIntervalMs: number;
+  rollingHitRateSize: number;
   shouldLogTrainingProgress: boolean;
   shouldRestoreOnStart: boolean;
   snapshotStoreService: SnapshotStoreService;
   supportedAssets: ModelAsset[];
-  supportedWindows: ModelWindow[];
-  trainingIntervalMs: number;
 };
-
-const UNIX_EPOCH_ISO = "1970-01-01T00:00:00.000Z";
 
 /**
  * @section class
@@ -58,13 +66,15 @@ export class ModelRuntimeService {
 
   private readonly collectorClientService: CollectorClientService;
 
-  private readonly modelCostService: ModelCostService;
-
   private readonly modelFeatureService: ModelFeatureService;
 
   private readonly modelRuntimeStateService: ModelRuntimeStateService;
 
   private readonly modelTrainingService: ModelTrainingService;
+
+  private readonly processIntervalMs: number;
+
+  private readonly rollingHitRateSize: number;
 
   private readonly shouldLogTrainingProgress: boolean;
 
@@ -74,25 +84,25 @@ export class ModelRuntimeService {
 
   private readonly supportedAssets: ModelAsset[];
 
-  private readonly supportedWindows: ModelWindow[];
+  private readonly artifactRegistry: Map<ModelAsset, ModelArtifact>;
 
-  private readonly trainingIntervalMs: number;
+  private readonly assetPredictionRegistry: Map<ModelAsset, string[]>;
 
-  private readonly clobArtifactRegistry: Map<ModelClobKey, ModelClobArtifact>;
+  private readonly pendingResolutionTimerRegistry: Map<string, ReturnType<typeof setTimeout>>;
 
-  private readonly statusRegistry: Map<ModelClobKey, ModelStatus>;
+  private readonly predictionRegistry: Map<string, ModelPredictionRecord>;
 
-  private readonly trendArtifactRegistry: Map<ModelTrendKey, ModelTrendArtifact>;
+  private readonly rollingOutcomeRegistry: Map<ModelAsset, boolean[]>;
+
+  private readonly statusRegistry: Map<ModelAsset, ModelStatus>;
+
+  private isProcessing: boolean;
 
   private isStarted: boolean;
 
-  private isTrainingCycleRunning: boolean;
+  private lastHistoricalBlockCompletedAt: string | null;
 
-  private lastTrainedSnapshotAt: number | null;
-
-  private lastTrainingCycleAt: string | null;
-
-  private trainingTimer: ReturnType<typeof setInterval> | null;
+  private processingTimer: ReturnType<typeof setInterval> | null;
 
   /**
    * @section constructor
@@ -100,25 +110,26 @@ export class ModelRuntimeService {
 
   public constructor(options: ModelRuntimeServiceOptions) {
     this.collectorClientService = options.collectorClientService;
-    this.modelCostService = options.modelCostService;
     this.modelFeatureService = options.modelFeatureService;
     this.modelRuntimeStateService = options.modelRuntimeStateService;
     this.modelTrainingService = options.modelTrainingService;
+    this.processIntervalMs = options.processIntervalMs;
+    this.rollingHitRateSize = options.rollingHitRateSize;
     this.shouldLogTrainingProgress = options.shouldLogTrainingProgress;
     this.shouldRestoreOnStart = options.shouldRestoreOnStart;
     this.snapshotStoreService = options.snapshotStoreService;
     this.supportedAssets = options.supportedAssets;
-    this.supportedWindows = options.supportedWindows;
-    this.trainingIntervalMs = options.trainingIntervalMs;
-    this.clobArtifactRegistry = new Map<ModelClobKey, ModelClobArtifact>();
-    this.statusRegistry = new Map<ModelClobKey, ModelStatus>();
-    this.trendArtifactRegistry = new Map<ModelTrendKey, ModelTrendArtifact>();
+    this.artifactRegistry = new Map<ModelAsset, ModelArtifact>();
+    this.assetPredictionRegistry = new Map<ModelAsset, string[]>();
+    this.pendingResolutionTimerRegistry = new Map<string, ReturnType<typeof setTimeout>>();
+    this.predictionRegistry = new Map<string, ModelPredictionRecord>();
+    this.rollingOutcomeRegistry = new Map<ModelAsset, boolean[]>();
+    this.statusRegistry = new Map<ModelAsset, ModelStatus>();
+    this.isProcessing = false;
     this.isStarted = false;
-    this.isTrainingCycleRunning = false;
-    this.lastTrainedSnapshotAt = null;
-    this.lastTrainingCycleAt = null;
-    this.trainingTimer = null;
-    this.initializeStatuses();
+    this.lastHistoricalBlockCompletedAt = null;
+    this.processingTimer = null;
+    this.initializeRegistries();
   }
 
   /**
@@ -127,302 +138,110 @@ export class ModelRuntimeService {
 
   public static createDefault(): ModelRuntimeService {
     const modelFeatureService = ModelFeatureService.createDefault();
-    return new ModelRuntimeService({
+    const modelRuntimeService = new ModelRuntimeService({
       collectorClientService: CollectorClientService.createDefault(),
-      modelCostService: ModelCostService.createDefault(),
       modelFeatureService,
       modelRuntimeStateService: ModelRuntimeStateService.createDefault(),
       modelTrainingService: ModelTrainingService.createDefault(modelFeatureService.buildFeatureNames()),
+      processIntervalMs: config.MODEL_PROCESS_INTERVAL_MS,
+      rollingHitRateSize: config.MODEL_ROLLING_HIT_RATE_SIZE,
       shouldLogTrainingProgress: config.MODEL_LOG_TRAINING_PROGRESS,
       shouldRestoreOnStart: config.MODEL_RESTORE_ON_START,
       snapshotStoreService: SnapshotStoreService.createDefault(),
       supportedAssets: config.MODEL_SUPPORTED_ASSETS as ModelAsset[],
-      supportedWindows: config.MODEL_SUPPORTED_WINDOWS as ModelWindow[],
-      trainingIntervalMs: config.MODEL_TRAINING_INTERVAL_MS,
     });
+    return modelRuntimeService;
   }
 
   /**
    * @section private:methods
    */
 
-  private buildModelKey(asset: ModelAsset, window: ModelWindow): ModelClobKey {
-    const modelKey = `${asset}_${window}` as ModelClobKey;
-    return modelKey;
-  }
-
-  private buildBaseMetrics(): ModelMetrics {
-    const metrics: ModelMetrics = {
-      clobDirectionMacroF1: null,
-      clobDirectionSupport: { down: 0, flat: 0, up: 0 },
-      clobRegressionHuber: null,
-      clobRegressionMae: null,
-      clobRegressionRmse: null,
-      sampleCount: 0,
-      trendDirectionMacroF1: null,
-      trendDirectionSupport: { down: 0, flat: 0, up: 0 },
-      trendRegressionHuber: null,
-      trendRegressionMae: null,
-      trendRegressionRmse: null,
-    };
-    return metrics;
-  }
-
-  private initializeStatuses(): void {
-    const featureNames = this.modelFeatureService.buildFeatureNames();
-    const trendFeatureCount = featureNames.trendFeatures.length;
-    const clobFeatureCount = featureNames.clobFeatures.length;
-
+  private initializeRegistries(): void {
     this.supportedAssets.forEach((asset) => {
-      this.supportedWindows.forEach((window) => {
-        const modelKey = this.buildModelKey(asset, window);
-        const trendSequenceLength = this.modelFeatureService.getSequenceLength(asset, "trend");
-        const clobSequenceLength = this.modelFeatureService.getSequenceLength(modelKey, "clob");
-        this.statusRegistry.set(modelKey, {
-          activeMarket: null,
-          asset,
-          clobFeatureCount,
-          clobVersion: 0,
-          clobSequenceLength,
-          headVersionSkew: false,
-          lastError: null,
-          lastTrainingCompletedAt: null,
-          lastTrainingStartedAt: null,
-          lastValidationWindowEnd: null,
-          lastValidationWindowStart: null,
-          latestSnapshotAt: null,
-          liveSnapshotCount: 0,
-          metrics: this.buildBaseMetrics(),
-          modelFamily: "tcn",
-          modelKey,
-          state: "idle",
-          trainingSampleCount: 0,
-          trendFeatureCount,
-          trendModelKey: asset,
-          trendSequenceLength,
-          trendVersion: 0,
-          validationSampleCount: 0,
-          version: 0,
-          window,
-        });
-      });
+      this.assetPredictionRegistry.set(asset, []);
+      this.rollingOutcomeRegistry.set(asset, []);
+      this.statusRegistry.set(asset, this.buildBaseStatus(asset));
     });
   }
 
-  private getStatus(modelKey: ModelClobKey): ModelStatus {
-    const status = this.statusRegistry.get(modelKey);
+  private buildBaseStatus(asset: ModelAsset): ModelStatus {
+    const modelStatus: ModelStatus = {
+      asset,
+      currentBlockEndAt: null,
+      currentBlockStartAt: null,
+      isLiveReady: false,
+      lastCollectorFromAt: null,
+      lastError: null,
+      lastLiveSnapshotAt: null,
+      lastPredictionAt: null,
+      lastPredictionSource: null,
+      lastPredictionWasCorrect: null,
+      lastTrainingAt: null,
+      lastTrainingStatus: "idle",
+      latestPrediction: null,
+      modelFamily: "tcn",
+      rollingCorrectCount: 0,
+      rollingHitRate: null,
+      rollingPredictionCount: 0,
+      state: "idle",
+      trainingCount: 0,
+    };
+    return modelStatus;
+  }
+
+  private getStatus(asset: ModelAsset): ModelStatus {
+    const status = this.statusRegistry.get(asset);
 
     if (status === undefined) {
-      throw new Error(`missing status for ${modelKey}`);
+      throw new Error(`missing status for ${asset}`);
     }
 
     return status;
   }
 
-  private updateStatus(modelKey: ModelClobKey, statusPatch: Partial<ModelStatus>): void {
-    this.statusRegistry.set(modelKey, {
-      ...this.getStatus(modelKey),
+  private updateStatus(asset: ModelAsset, statusPatch: Partial<ModelStatus>): void {
+    this.statusRegistry.set(asset, {
+      ...this.getStatus(asset),
       ...statusPatch,
     });
   }
 
-  private buildCompositeMetrics(asset: ModelAsset, modelKey: ModelClobKey): ModelMetrics {
-    const trendArtifact = this.trendArtifactRegistry.get(asset) || null;
-    const clobArtifact = this.clobArtifactRegistry.get(modelKey) || null;
-    const metrics: ModelMetrics = {
-      clobDirectionMacroF1: clobArtifact?.model.metrics.directionMacroF1 || null,
-      clobDirectionSupport: clobArtifact?.model.metrics.directionSupport || { down: 0, flat: 0, up: 0 },
-      clobRegressionHuber: clobArtifact?.model.metrics.regressionHuber || null,
-      clobRegressionMae: clobArtifact?.model.metrics.regressionMae || null,
-      clobRegressionRmse: clobArtifact?.model.metrics.regressionRmse || null,
-      sampleCount: Math.max(trendArtifact?.model.metrics.sampleCount || 0, clobArtifact?.model.metrics.sampleCount || 0),
-      trendDirectionMacroF1: trendArtifact?.model.metrics.directionMacroF1 || null,
-      trendDirectionSupport: trendArtifact?.model.metrics.directionSupport || { down: 0, flat: 0, up: 0 },
-      trendRegressionHuber: trendArtifact?.model.metrics.regressionHuber || null,
-      trendRegressionMae: trendArtifact?.model.metrics.regressionMae || null,
-      trendRegressionRmse: trendArtifact?.model.metrics.regressionRmse || null,
+  private buildRuntimeStateAssetSnapshot(asset: ModelAsset): ModelRuntimeStateAssetSnapshot {
+    const assetStateSnapshot: ModelRuntimeStateAssetSnapshot = {
+      lastCollectorFromAt: this.getStatus(asset).lastCollectorFromAt,
+      lastProcessedBlockEndAt: this.getStatus(asset).currentBlockEndAt,
+      lastProcessedBlockStartAt: this.getStatus(asset).currentBlockStartAt,
+      recentPredictionRecords: this.listAssetPredictions(asset),
+      rollingPredictionOutcomes: [...(this.rollingOutcomeRegistry.get(asset) || [])],
     };
-    return metrics;
+    return assetStateSnapshot;
   }
 
-  private refreshModelStatus(modelKey: ModelClobKey): void {
-    const currentStatus = this.getStatus(modelKey);
-    const trendArtifact = this.trendArtifactRegistry.get(currentStatus.asset) || null;
-    const clobArtifact = this.clobArtifactRegistry.get(modelKey) || null;
-    const isReady = trendArtifact !== null && clobArtifact !== null;
-    const hasHeadVersionSkew =
-      trendArtifact !== null && clobArtifact !== null && (trendArtifact.version !== clobArtifact.version || trendArtifact.trainedAt !== clobArtifact.trainedAt);
-    this.updateStatus(modelKey, {
-      clobVersion: clobArtifact?.version || 0,
-      lastError: null,
-      lastTrainingCompletedAt: clobArtifact?.trainedAt || trendArtifact?.trainedAt || currentStatus.lastTrainingCompletedAt,
-      lastValidationWindowEnd: clobArtifact?.lastValidationWindowEnd || trendArtifact?.lastValidationWindowEnd || null,
-      lastValidationWindowStart: clobArtifact?.lastValidationWindowStart || trendArtifact?.lastValidationWindowStart || null,
-      headVersionSkew: hasHeadVersionSkew,
-      metrics: this.buildCompositeMetrics(currentStatus.asset, modelKey),
-      state: isReady ? "ready" : currentStatus.state,
-      trainingSampleCount: clobArtifact?.trainingSampleCount || trendArtifact?.trainingSampleCount || 0,
-      trendVersion: trendArtifact?.version || 0,
-      validationSampleCount: clobArtifact?.validationSampleCount || trendArtifact?.validationSampleCount || 0,
-      version: clobArtifact?.version || 0,
-    });
-  }
-
-  private refreshLiveStatusFields(): void {
-    const liveSnapshots = this.snapshotStoreService.getLiveSnapshots();
-    const latestSnapshotAt = this.snapshotStoreService.getLatestSnapshotAt();
-    const contexts = liveSnapshots.length === 0 ? [] : this.modelFeatureService.buildSnapshotContexts(liveSnapshots);
-    const latestContext = contexts.at(-1) || null;
-    this.statusRegistry.forEach((status, modelKey) => {
-      this.updateStatus(modelKey, {
-        activeMarket: latestContext?.marketContexts[modelKey].activeMarket || status.activeMarket,
-        latestSnapshotAt,
-        liveSnapshotCount: liveSnapshots.length,
-      });
-    });
-  }
-
-  private buildHistoricalFromDate(): string {
-    const overlapTimestamp =
-      this.lastTrainedSnapshotAt === null ? null : Math.max(0, this.lastTrainedSnapshotAt - this.modelFeatureService.getRequiredOverlapMs());
-    const historicalFromDate = overlapTimestamp === null ? UNIX_EPOCH_ISO : new Date(overlapTimestamp).toISOString();
-    return historicalFromDate;
-  }
-
-  private mergeSnapshots(snapshots: FlatSnapshot[]): FlatSnapshot[] {
-    const mergedSnapshots = [...snapshots]
-      .sort((leftSnapshot, rightSnapshot) => leftSnapshot.generated_at - rightSnapshot.generated_at)
-      .reduce<FlatSnapshot[]>((snapshotList, snapshot) => {
-        const lastSnapshot = snapshotList.at(-1) || null;
-
-        if (lastSnapshot === null || lastSnapshot.generated_at !== snapshot.generated_at) {
-          snapshotList.push(snapshot);
-        }
-
-        if (lastSnapshot !== null && lastSnapshot.generated_at === snapshot.generated_at) {
-          snapshotList[snapshotList.length - 1] = {
-            ...lastSnapshot,
-            ...snapshot,
-          };
-        }
-
-        return snapshotList;
-      }, []);
-    return mergedSnapshots;
-  }
-
-  private buildCarryoverSnapshots(snapshots: FlatSnapshot[]): FlatSnapshot[] {
-    const requiredOverlapMs = this.modelFeatureService.getRequiredOverlapMs();
-    const latestSnapshotAt = snapshots.at(-1)?.generated_at || null;
-    const carryoverSnapshots = latestSnapshotAt === null ? [] : snapshots.filter((snapshot) => snapshot.generated_at >= latestSnapshotAt - requiredOverlapMs);
-    return carryoverSnapshots;
-  }
-
-  private async runIncrementalTrainingPass(
-    historicalSnapshots: FlatSnapshot[],
-    carryoverSnapshots: FlatSnapshot[],
-  ): Promise<{ clobSampleCount: number; historicalCount: number; trendSampleCount: number }> {
-    const mergedSnapshots = this.mergeSnapshots([...carryoverSnapshots, ...historicalSnapshots]);
-    const trendSamples = this.modelFeatureService.buildTrendTrainingSamples(mergedSnapshots);
-    const clobSamples = this.modelFeatureService.buildClobTrainingSamples(mergedSnapshots);
-
-    for (const asset of this.supportedAssets) {
-      const trendResult = await this.modelTrainingService.trainTrend(
-        asset,
-        trendSamples.filter((sample) => sample.trendKey === asset),
-      );
-
-      if (trendResult.artifact !== null) {
-        this.replaceTrendArtifact(asset, trendResult.artifact);
-        this.logTrainingBlock(asset, trendResult.artifact.version, trendResult.trainingSampleCount, trendResult.validationSampleCount);
-      }
-    }
-
-    for (const asset of this.supportedAssets) {
-      for (const window of this.supportedWindows) {
-        const modelKey = this.buildModelKey(asset, window);
-        const clobResult = await this.modelTrainingService.trainClob(
-          modelKey,
-          clobSamples.filter((sample) => sample.modelKey === modelKey),
-        );
-
-        if (clobResult.artifact !== null) {
-          this.replaceClobArtifact(modelKey, clobResult.artifact);
-          this.logTrainingBlock(modelKey, clobResult.artifact.version, clobResult.trainingSampleCount, clobResult.validationSampleCount);
-        }
-      }
-    }
-
-    this.lastTrainingCycleAt = new Date().toISOString();
-    this.lastTrainedSnapshotAt = historicalSnapshots.at(-1)?.generated_at || this.lastTrainedSnapshotAt;
-    await this.modelRuntimeStateService.persistState(
-      this.lastTrainingCycleAt,
-      this.lastTrainedSnapshotAt === null ? null : new Date(this.lastTrainedSnapshotAt).toISOString(),
+  private buildRuntimeStateSnapshot(): ModelRuntimeStateSnapshot {
+    const assets = this.supportedAssets.reduce<Record<ModelAsset, ModelRuntimeStateAssetSnapshot>>(
+      (assetMap, asset) => {
+        assetMap[asset] = this.buildRuntimeStateAssetSnapshot(asset);
+        return assetMap;
+      },
+      {} as Record<ModelAsset, ModelRuntimeStateAssetSnapshot>,
     );
-    this.refreshLiveStatusFields();
-
-    return {
-      clobSampleCount: clobSamples.length,
-      historicalCount: historicalSnapshots.length,
-      trendSampleCount: trendSamples.length,
+    const runtimeStateSnapshot: ModelRuntimeStateSnapshot = {
+      assets,
+      lastHistoricalBlockCompletedAt: this.lastHistoricalBlockCompletedAt,
+      schemaVersion: 2,
     };
+    return runtimeStateSnapshot;
   }
 
-  private async runIncrementalCatchupCycle(): Promise<{
-    clobSampleCount: number;
-    historicalCount: number;
-    passCount: number;
-    trendSampleCount: number;
-  }> {
-    const catchupToDate = new Date().toISOString();
-    const pageLimit = config.SNAPSHOT_COLLECTOR_PAGE_LIMIT;
-    let carryoverSnapshots: FlatSnapshot[] = [];
-    let cursorFromDate = this.buildHistoricalFromDate();
-    let clobSampleCount = 0;
-    let historicalCount = 0;
-    let isCatchingUp = true;
-    let passCount = 0;
-    let trendSampleCount = 0;
-
-    while (isCatchingUp) {
-      const historicalSnapshots = await this.collectorClientService.readSnapshotPage({
-        fromDate: cursorFromDate,
-        limit: pageLimit,
-        toDate: catchupToDate,
-      });
-
-      if (historicalSnapshots.length === 0) {
-        isCatchingUp = false;
-      } else {
-        const passSummary = await this.runIncrementalTrainingPass(historicalSnapshots, carryoverSnapshots);
-        const latestHistoricalSnapshot = historicalSnapshots.at(-1) || null;
-
-        if (latestHistoricalSnapshot !== null && latestHistoricalSnapshot.generated_at < Date.parse(cursorFromDate)) {
-          throw new Error(`collector pagination did not advance cursorFromDate=${cursorFromDate}`);
-        }
-
-        carryoverSnapshots = this.buildCarryoverSnapshots(this.mergeSnapshots([...carryoverSnapshots, ...historicalSnapshots]));
-        cursorFromDate = latestHistoricalSnapshot === null ? cursorFromDate : new Date(latestHistoricalSnapshot.generated_at + 1).toISOString();
-        clobSampleCount = passSummary.clobSampleCount;
-        historicalCount += passSummary.historicalCount;
-        passCount += 1;
-        trendSampleCount = passSummary.trendSampleCount;
-        isCatchingUp = historicalSnapshots.length === pageLimit;
-      }
-    }
-
-    return {
-      clobSampleCount,
-      historicalCount,
-      passCount,
-      trendSampleCount,
-    };
+  private async persistRuntimeState(): Promise<void> {
+    await this.modelRuntimeStateService.persistState(this.buildRuntimeStateSnapshot());
   }
 
   private parseHeadMetadata(rawMetadata: Record<string, unknown> | null): TensorflowApiHeadMetadata | null {
     let headMetadata: TensorflowApiHeadMetadata | null = null;
 
-    if (rawMetadata?.logicalKey && rawMetadata.logicalModelType) {
+    if (rawMetadata?.logicalKey && rawMetadata.logicalModelType === "crypto") {
       headMetadata = rawMetadata as unknown as TensorflowApiHeadMetadata;
     }
 
@@ -433,165 +252,420 @@ export class ModelRuntimeService {
     const headMetadata = this.parseHeadMetadata(modelRecord.metadata);
 
     if (modelRecord.status === "ready" && headMetadata !== null) {
-      if (headMetadata.logicalModelType === "trend") {
-        this.trendArtifactRegistry.set(headMetadata.logicalKey as ModelTrendKey, {
-          lastTrainWindowEnd: headMetadata.lastTrainWindowEnd,
-          lastTrainWindowStart: headMetadata.lastTrainWindowStart,
-          lastValidationWindowEnd: headMetadata.lastValidationWindowEnd,
-          lastValidationWindowStart: headMetadata.lastValidationWindowStart,
-          model: {
-            architecture: headMetadata.architecture,
-            classWeights: headMetadata.classWeights,
-            directionThreshold: headMetadata.directionThreshold,
-            featureMedians: headMetadata.featureMedians,
-            featureNames: headMetadata.featureNames,
-            featureScales: headMetadata.featureScales,
-            metrics: headMetadata.metrics,
-            remoteModelId: modelRecord.modelId,
-            targetEncoding: headMetadata.targetEncoding,
-          },
+      this.artifactRegistry.set(headMetadata.logicalKey as ModelAsset, {
+        asset: headMetadata.logicalKey as ModelAsset,
+        lastValidationWindowEnd: headMetadata.lastValidationWindowEnd,
+        lastValidationWindowStart: headMetadata.lastValidationWindowStart,
+        model: {
+          architecture: headMetadata.architecture,
+          classWeights: headMetadata.classWeights,
+          featureMedians: headMetadata.featureMedians,
+          featureNames: headMetadata.featureNames,
+          featureScales: headMetadata.featureScales,
+          metrics: headMetadata.metrics,
           remoteModelId: modelRecord.modelId,
-          trainedAt: headMetadata.trainedAt,
-          trainingSampleCount: headMetadata.trainingSampleCount,
-          trendKey: headMetadata.logicalKey as ModelTrendKey,
-          validationSampleCount: headMetadata.validationSampleCount,
-          version: modelRecord.trainingCount,
-        });
-      }
-
-      if (headMetadata.logicalModelType === "clob") {
-        const [asset, window] = headMetadata.logicalKey.split("_") as [ModelAsset, ModelWindow];
-        this.clobArtifactRegistry.set(headMetadata.logicalKey as ModelClobKey, {
-          asset,
-          lastTrainWindowEnd: headMetadata.lastTrainWindowEnd,
-          lastTrainWindowStart: headMetadata.lastTrainWindowStart,
-          lastValidationWindowEnd: headMetadata.lastValidationWindowEnd,
-          lastValidationWindowStart: headMetadata.lastValidationWindowStart,
-          model: {
-            architecture: headMetadata.architecture,
-            classWeights: headMetadata.classWeights,
-            directionThreshold: headMetadata.directionThreshold,
-            featureMedians: headMetadata.featureMedians,
-            featureNames: headMetadata.featureNames,
-            featureScales: headMetadata.featureScales,
-            metrics: headMetadata.metrics,
-            remoteModelId: modelRecord.modelId,
-            targetEncoding: headMetadata.targetEncoding,
-          },
-          modelKey: headMetadata.logicalKey as ModelClobKey,
-          remoteModelId: modelRecord.modelId,
-          trainedAt: headMetadata.trainedAt,
-          trainingSampleCount: headMetadata.trainingSampleCount,
-          validationSampleCount: headMetadata.validationSampleCount,
-          version: modelRecord.trainingCount,
-          window,
-        });
-      }
-    }
-    if (modelRecord.status === "failed" && headMetadata !== null && headMetadata.logicalModelType === "clob") {
-      this.updateStatus(headMetadata.logicalKey as ModelClobKey, {
-        lastError: `remote model failed modelId=${modelRecord.modelId}`,
-        state: "error",
+        },
+        remoteModelId: modelRecord.modelId,
+        trainedAt: headMetadata.trainedAt,
+        trainingSampleCount: headMetadata.trainingSampleCount,
+        validationSampleCount: headMetadata.validationSampleCount,
+        version: modelRecord.trainingCount,
+      });
+      this.updateStatus(headMetadata.logicalKey as ModelAsset, {
+        lastTrainingAt: headMetadata.trainedAt,
+        lastTrainingStatus: "ready",
+        trainingCount: modelRecord.trainingCount,
       });
     }
   }
 
   private async restorePersistedState(): Promise<void> {
-    const runtimeStateSnapshot = this.shouldRestoreOnStart
-      ? await this.modelRuntimeStateService.loadState()
-      : { lastTrainingCycleAt: null, lastTrainedSnapshotAt: null, schemaVersion: 1 };
-    this.lastTrainingCycleAt = runtimeStateSnapshot.lastTrainingCycleAt;
-    this.lastTrainedSnapshotAt = runtimeStateSnapshot.lastTrainedSnapshotAt === null ? null : Date.parse(runtimeStateSnapshot.lastTrainedSnapshotAt);
+    const runtimeStateSnapshot = this.shouldRestoreOnStart ? await this.modelRuntimeStateService.loadState() : this.buildRuntimeStateSnapshot();
+    this.lastHistoricalBlockCompletedAt = runtimeStateSnapshot.lastHistoricalBlockCompletedAt;
+    this.supportedAssets.forEach((asset) => {
+      const assetState = runtimeStateSnapshot.assets[asset];
+      const recentPredictionRecords = assetState?.recentPredictionRecords || [];
+      const predictionIds = recentPredictionRecords.map((predictionRecord) => predictionRecord.predictionId);
+      recentPredictionRecords.forEach((predictionRecord) => {
+        this.predictionRegistry.set(predictionRecord.predictionId, predictionRecord);
+      });
+      this.assetPredictionRegistry.set(asset, predictionIds);
+      this.rollingOutcomeRegistry.set(asset, [...(assetState?.rollingPredictionOutcomes || [])].slice(-this.rollingHitRateSize));
+      this.updateStatus(asset, {
+        currentBlockEndAt: assetState?.lastProcessedBlockEndAt || null,
+        currentBlockStartAt: assetState?.lastProcessedBlockStartAt || null,
+        lastCollectorFromAt: assetState?.lastCollectorFromAt || null,
+      });
+      this.refreshPredictionStatusFields(asset);
+    });
 
     if (this.shouldRestoreOnStart) {
       const remoteModelRecords = await this.modelTrainingService.readRemoteModels();
       remoteModelRecords.forEach((modelRecord) => {
         this.applyRemoteModelRecord(modelRecord);
       });
-      this.statusRegistry.forEach((_status, modelKey) => {
-        this.refreshModelStatus(modelKey);
-      });
     }
   }
 
-  private markTrainingStarted(startedAt: string): void {
-    this.isTrainingCycleRunning = true;
-    this.statusRegistry.forEach((status, modelKey) => {
-      this.updateStatus(modelKey, {
-        lastError: null,
-        lastTrainingStartedAt: startedAt,
-        state: status.version === 0 ? "training" : status.state,
-      });
+  private buildPredictionDirection(predictedReturn: number): "down" | "up" {
+    const predictedDirection: "down" | "up" = predictedReturn > 0 ? "up" : "down";
+    return predictedDirection;
+  }
+
+  private buildProbabilityDown(predictedProbability: ModelDirectionProbability): number | null {
+    const predictedProbabilityDown = Number.isFinite(predictedProbability.down) ? predictedProbability.down : null;
+    return predictedProbabilityDown;
+  }
+
+  private buildProbabilityUp(predictedProbability: ModelDirectionProbability): number | null {
+    const predictedProbabilityUp = Number.isFinite(predictedProbability.up) ? predictedProbability.up : null;
+    return predictedProbabilityUp;
+  }
+
+  private listAssetPredictions(asset: ModelAsset): ModelPredictionRecord[] {
+    const predictionIds = this.assetPredictionRegistry.get(asset) || [];
+    const predictionRecords = predictionIds
+      .map((predictionId) => this.predictionRegistry.get(predictionId) || null)
+      .filter((predictionRecord) => predictionRecord !== null);
+    return predictionRecords;
+  }
+
+  private refreshPredictionStatusFields(asset: ModelAsset): void {
+    const predictionRecords = this.listAssetPredictions(asset);
+    const latestPrediction = predictionRecords.at(-1) || null;
+    const rollingPredictionOutcomes = this.rollingOutcomeRegistry.get(asset) || [];
+    const rollingCorrectCount = rollingPredictionOutcomes.filter((outcome) => outcome).length;
+    this.updateStatus(asset, {
+      lastPredictionAt: latestPrediction?.issuedAt || null,
+      lastPredictionSource: latestPrediction?.source || null,
+      lastPredictionWasCorrect: latestPrediction?.isCorrect ?? null,
+      latestPrediction,
+      rollingCorrectCount,
+      rollingHitRate: rollingPredictionOutcomes.length === 0 ? null : rollingCorrectCount / rollingPredictionOutcomes.length,
+      rollingPredictionCount: rollingPredictionOutcomes.length,
     });
   }
 
-  private markTrainingFailed(error: unknown): void {
-    const errorMessage = error instanceof Error ? error.message : "training cycle failed";
-    this.isTrainingCycleRunning = false;
-    logger.error(`training cycle failed error=${errorMessage}`);
-    this.statusRegistry.forEach((_status, modelKey) => {
-      const hasReadyArtifact = this.clobArtifactRegistry.has(modelKey) && this.trendArtifactRegistry.has(this.getStatus(modelKey).asset);
-      this.updateStatus(modelKey, {
-        lastError: errorMessage,
-        state: hasReadyArtifact ? "ready" : "error",
-      });
+  private registerPrediction(predictionRecord: ModelPredictionRecord): void {
+    const existingPredictionIds = this.assetPredictionRegistry.get(predictionRecord.asset) || [];
+    const nextPredictionIds = [...existingPredictionIds, predictionRecord.predictionId];
+    const removedPredictionIds = nextPredictionIds.slice(0, Math.max(nextPredictionIds.length - RECENT_PREDICTION_LIMIT, 0));
+    const predictionIds = nextPredictionIds.slice(-RECENT_PREDICTION_LIMIT);
+
+    removedPredictionIds.forEach((removedPredictionId) => {
+      this.predictionRegistry.delete(removedPredictionId);
     });
+
+    this.predictionRegistry.set(predictionRecord.predictionId, predictionRecord);
+    this.assetPredictionRegistry.set(predictionRecord.asset, predictionIds);
+    this.refreshPredictionStatusFields(predictionRecord.asset);
   }
 
-  private replaceTrendArtifact(asset: ModelTrendKey, artifact: ModelTrendArtifact): void {
-    this.trendArtifactRegistry.set(asset, artifact);
-    this.supportedWindows.forEach((window) => {
-      this.refreshModelStatus(this.buildModelKey(asset, window));
-    });
+  private updatePrediction(predictionRecord: ModelPredictionRecord): void {
+    this.predictionRegistry.set(predictionRecord.predictionId, predictionRecord);
+    this.refreshPredictionStatusFields(predictionRecord.asset);
   }
 
-  private replaceClobArtifact(modelKey: ModelClobKey, artifact: ModelClobArtifact): void {
-    this.clobArtifactRegistry.set(modelKey, artifact);
-    this.refreshModelStatus(modelKey);
+  private appendResolvedOutcome(asset: ModelAsset, isCorrect: boolean): void {
+    const rollingPredictionOutcomes = [...(this.rollingOutcomeRegistry.get(asset) || []), isCorrect].slice(-this.rollingHitRateSize);
+    this.rollingOutcomeRegistry.set(asset, rollingPredictionOutcomes);
+    this.refreshPredictionStatusFields(asset);
   }
 
-  private logTrainingBlock(modelKey: string, version: number, trainingSampleCount: number, validationSampleCount: number): void {
-    if (this.shouldLogTrainingProgress) {
-      logger.info(`training block completed model=${modelKey} version=${version} train=${trainingSampleCount} valid=${validationSampleCount}`);
-    }
-  }
-
-  private async runScheduledTrainingCycle(): Promise<void> {
-    try {
-      await this.runTrainingCycle();
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : "scheduled training cycle failed";
-      logger.error(`scheduled training cycle failed error=${errorMessage}`);
-    }
-  }
-
-  private buildPredictionPayload(
-    input: ModelPredictionInput,
-    trendPrediction: { predictedValue: number; probabilities: { down: number; flat: number; up: number } },
-    clobPrediction: { predictedValue: number; probabilities: { down: number; flat: number; up: number } },
-    fusionPayload: ModelPredictionPayload["fusion"],
-  ): ModelPredictionPayload {
-    const predictionPayload: ModelPredictionPayload = {
-      activeMarket: input.clobInput.activeMarket,
-      clob: {
-        currentUpMid: input.clobInput.currentUpMid,
-        edge: input.clobInput.currentUpMid === null ? null : clobPrediction.predictedValue - input.clobInput.currentUpMid,
-        isOrderBookFresh: input.clobInput.isOrderBookFresh,
-        predictedUpMid: clobPrediction.predictedValue,
-        probabilities: clobPrediction.probabilities,
-      },
-      fusion: fusionPayload,
-      generatedAt: new Date(input.clobInput.decisionTime).toISOString(),
-      liveSnapshotCount: this.snapshotStoreService.getLiveSnapshots().length,
-      modelKey: input.clobInput.modelKey,
-      trend: {
-        fairUpProbability: this.modelCostService.readTrendFairProbability(input, trendPrediction.predictedValue),
-        isChainlinkFresh: input.trendInput.isChainlinkFresh,
-        predictedReturn: trendPrediction.predictedValue,
-        probabilities: trendPrediction.probabilities,
-      },
+  private buildPredictionRecord(
+    asset: ModelAsset,
+    source: "automatic" | "manual",
+    issuedAt: number,
+    contextStartAt: number,
+    contextEndAt: number,
+    referenceValueAtPrediction: number | null,
+    predictedReturn: number,
+    predictedProbability: ModelDirectionProbability,
+  ): ModelPredictionRecord {
+    const predictedDirection = this.buildPredictionDirection(predictedReturn);
+    const predictionRecord: ModelPredictionRecord = {
+      actualDirection: null,
+      actualReturn: null,
+      asset,
+      contextEndAt: new Date(contextEndAt).toISOString(),
+      contextStartAt: new Date(contextStartAt).toISOString(),
+      downValueAtPrediction: this.buildProbabilityDown(predictedProbability),
+      downValueAtTargetEnd: null,
+      errorMessage: null,
+      issuedAt: new Date(issuedAt).toISOString(),
+      predictedDirection,
+      predictedProbabilityDown: this.buildProbabilityDown(predictedProbability),
+      predictedProbabilityUp: this.buildProbabilityUp(predictedProbability),
+      predictedReturn,
+      predictionId: randomUUID(),
+      referenceValueAtPrediction,
+      referenceValueAtTargetEnd: null,
+      resolvedAt: null,
+      source,
+      status: "pending",
+      targetEndAt: new Date(issuedAt + this.modelFeatureService.getPredictionTargetMs()).toISOString(),
+      targetStartAt: new Date(issuedAt).toISOString(),
+      upValueAtPrediction: this.buildProbabilityUp(predictedProbability),
+      upValueAtTargetEnd: null,
+      isCorrect: null,
     };
-    return predictionPayload;
+    return predictionRecord;
+  }
+
+  private resolvePredictionRecord(predictionRecord: ModelPredictionRecord, referenceValueAtTargetEnd: number): ModelPredictionRecord {
+    const referenceValueAtPrediction = predictionRecord.referenceValueAtPrediction || referenceValueAtTargetEnd;
+    const actualReturn = referenceValueAtPrediction > 0 ? Math.log(referenceValueAtTargetEnd / referenceValueAtPrediction) : 0;
+    const actualDirection = actualReturn > 0 ? "up" : "down";
+    const isCorrect = predictionRecord.predictedDirection === actualDirection;
+    const resolvedPredictionRecord: ModelPredictionRecord = {
+      ...predictionRecord,
+      actualDirection,
+      actualReturn,
+      downValueAtTargetEnd: actualDirection === "down" ? 1 : 0,
+      referenceValueAtTargetEnd,
+      resolvedAt: new Date().toISOString(),
+      status: "resolved",
+      upValueAtTargetEnd: actualDirection === "up" ? 1 : 0,
+      isCorrect,
+    };
+    return resolvedPredictionRecord;
+  }
+
+  private buildErrorPredictionRecord(predictionRecord: ModelPredictionRecord, errorMessage: string): ModelPredictionRecord {
+    const erroredPredictionRecord: ModelPredictionRecord = {
+      ...predictionRecord,
+      errorMessage,
+      resolvedAt: new Date().toISOString(),
+      status: "error",
+    };
+    return erroredPredictionRecord;
+  }
+
+  private refreshLiveStatusFields(): void {
+    const liveSnapshots = this.snapshotStoreService.getLiveSnapshots();
+    const latestSnapshotAt = this.snapshotStoreService.getLatestSnapshotAt();
+    this.supportedAssets.forEach((asset) => {
+      const predictionSnapshots = this.modelFeatureService.buildLivePredictionSnapshots(liveSnapshots);
+      const predictionInput = this.modelFeatureService.buildPredictionInput(asset, predictionSnapshots);
+      this.updateStatus(asset, {
+        isLiveReady: predictionInput !== null,
+        lastLiveSnapshotAt: latestSnapshotAt,
+      });
+    });
+  }
+
+  private buildAlignedBlockStart(timestamp: number): number {
+    const blockDurationMs = this.modelFeatureService.getBlockDurationMs();
+    const alignedBlockStart = Math.floor(timestamp / blockDurationMs) * blockDurationMs;
+    return alignedBlockStart;
+  }
+
+  private async readInitialBlockStart(): Promise<number | null> {
+    const firstSnapshots = await this.collectorClientService.readSnapshotPage({
+      fromDate: UNIX_EPOCH_ISO,
+      limit: 1,
+      toDate: new Date().toISOString(),
+    });
+    const initialBlockStart = firstSnapshots.length === 0 ? null : this.buildAlignedBlockStart(firstSnapshots[0]?.generated_at || 0);
+    return initialBlockStart;
+  }
+
+  private async readNextBlockStart(asset: ModelAsset): Promise<number | null> {
+    const status = this.getStatus(asset);
+    const nextBlockStart = status.lastCollectorFromAt === null ? await this.readInitialBlockStart() : Date.parse(status.lastCollectorFromAt);
+    return nextBlockStart;
+  }
+
+  private async readHistoricalBlock(blockStartAt: number, blockEndAt: number): Promise<FlatSnapshot[]> {
+    const historicalSnapshots = await this.collectorClientService.readSnapshots({
+      fromDate: new Date(blockStartAt).toISOString(),
+      toDate: new Date(blockEndAt).toISOString(),
+    });
+    return historicalSnapshots;
+  }
+
+  private readBlockContextSnapshots(snapshots: FlatSnapshot[], blockStartAt: number): FlatSnapshot[] {
+    const blockContextSnapshots = snapshots.filter((snapshot) => snapshot.generated_at < blockStartAt + config.MODEL_PREDICTION_CONTEXT_MS);
+    return blockContextSnapshots;
+  }
+
+  private async runAutomaticPrediction(asset: ModelAsset, blockSnapshots: FlatSnapshot[], blockStartAt: number): Promise<void> {
+    const artifact = this.artifactRegistry.get(asset) || null;
+
+    if (artifact !== null) {
+      const predictionSnapshots = this.readBlockContextSnapshots(blockSnapshots, blockStartAt);
+      const predictionInput = this.modelFeatureService.buildPredictionInput(asset, predictionSnapshots);
+
+      if (predictionInput !== null) {
+        const prediction = await this.modelTrainingService.predictAsset(artifact, predictionInput);
+        const predictionRecord = this.buildPredictionRecord(
+          asset,
+          "automatic",
+          blockStartAt + config.MODEL_PREDICTION_CONTEXT_MS,
+          blockStartAt,
+          blockStartAt + config.MODEL_PREDICTION_CONTEXT_MS,
+          predictionInput.currentChainlinkPrice || predictionInput.currentExchangePrice,
+          prediction.predictedReturn,
+          prediction.predictedProbability,
+        );
+        const referenceValueAtTargetEnd = this.modelFeatureService.readReferenceValue(
+          asset,
+          blockSnapshots,
+          blockStartAt + config.MODEL_PREDICTION_CONTEXT_MS * 2,
+        );
+
+        if (referenceValueAtTargetEnd !== null) {
+          const resolvedPredictionRecord = this.resolvePredictionRecord(predictionRecord, referenceValueAtTargetEnd);
+          this.registerPrediction(resolvedPredictionRecord);
+
+          if (resolvedPredictionRecord.isCorrect !== null) {
+            this.appendResolvedOutcome(asset, resolvedPredictionRecord.isCorrect);
+          }
+        } else {
+          this.registerPrediction(this.buildErrorPredictionRecord(predictionRecord, "unable to resolve automatic prediction outcome"));
+        }
+      }
+    }
+  }
+
+  private async trainAssetBlock(asset: ModelAsset, blockSnapshots: FlatSnapshot[]): Promise<void> {
+    const trainingSamples = this.modelFeatureService.buildTrainingSamples(asset, blockSnapshots);
+    const trainingResult = await this.modelTrainingService.trainAsset(asset, trainingSamples);
+
+    if (trainingResult.artifact !== null) {
+      this.artifactRegistry.set(asset, trainingResult.artifact);
+      this.updateStatus(asset, {
+        lastError: null,
+        lastTrainingAt: trainingResult.artifact.trainedAt,
+        lastTrainingStatus: "ready",
+        trainingCount: trainingResult.artifact.version,
+      });
+
+      if (this.shouldLogTrainingProgress) {
+        logger.info(
+          `training block completed asset=${asset} version=${trainingResult.artifact.version} train=${trainingResult.trainingSampleCount} valid=${trainingResult.validationSampleCount}`,
+        );
+      }
+    }
+  }
+
+  private async processHistoricalAsset(asset: ModelAsset): Promise<void> {
+    const blockStartAt = await this.readNextBlockStart(asset);
+
+    if (blockStartAt === null) {
+      this.updateStatus(asset, {
+        state: "waiting",
+      });
+    } else {
+      const blockEndAt = blockStartAt + this.modelFeatureService.getBlockDurationMs();
+
+      if (blockEndAt > Date.now()) {
+        this.updateStatus(asset, {
+          currentBlockEndAt: new Date(blockEndAt).toISOString(),
+          currentBlockStartAt: new Date(blockStartAt).toISOString(),
+          state: "waiting",
+        });
+      } else {
+        this.updateStatus(asset, {
+          currentBlockEndAt: new Date(blockEndAt).toISOString(),
+          currentBlockStartAt: new Date(blockStartAt).toISOString(),
+          lastError: null,
+          state: "predicting",
+        });
+
+        try {
+          const blockSnapshots = await this.readHistoricalBlock(blockStartAt, blockEndAt);
+
+          if (blockSnapshots.length === 0) {
+            throw new Error("collector returned no snapshots for closed block");
+          }
+
+          await this.runAutomaticPrediction(asset, blockSnapshots, blockStartAt);
+          this.updateStatus(asset, {
+            state: "training",
+          });
+          await this.trainAssetBlock(asset, blockSnapshots);
+          this.updateStatus(asset, {
+            lastCollectorFromAt: new Date(blockEndAt).toISOString(),
+            state: "idle",
+          });
+          this.lastHistoricalBlockCompletedAt = new Date(blockEndAt).toISOString();
+          await this.persistRuntimeState();
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : "historical asset processing failed";
+          logger.error(`historical asset processing failed asset=${asset} error=${errorMessage}`);
+          this.updateStatus(asset, {
+            lastError: errorMessage,
+            state: "error",
+          });
+        }
+      }
+    }
+  }
+
+  private schedulePendingResolution(predictionId: string): void {
+    const timeoutId = setTimeout(() => {
+      void this.resolveManualPrediction(predictionId);
+    }, this.modelFeatureService.getPredictionTargetMs());
+    this.pendingResolutionTimerRegistry.set(predictionId, timeoutId);
+  }
+
+  private clearPendingResolution(predictionId: string): void {
+    const timeoutId = this.pendingResolutionTimerRegistry.get(predictionId) || null;
+
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+      this.pendingResolutionTimerRegistry.delete(predictionId);
+    }
+  }
+
+  private async resolveManualPrediction(predictionId: string): Promise<void> {
+    const predictionRecord = this.predictionRegistry.get(predictionId) || null;
+
+    if (predictionRecord !== null && predictionRecord.status === "pending") {
+      const liveSnapshots = this.snapshotStoreService.getLiveSnapshots();
+      const targetEndAt = Date.parse(predictionRecord.targetEndAt);
+      const latestLiveSnapshotAt = liveSnapshots.at(-1)?.generated_at || 0;
+
+      if (latestLiveSnapshotAt < targetEndAt) {
+        this.clearPendingResolution(predictionId);
+        this.schedulePendingResolution(predictionId);
+      } else {
+        const referenceValueAtTargetEnd = this.modelFeatureService.readReferenceValue(predictionRecord.asset, liveSnapshots, targetEndAt);
+
+        if (referenceValueAtTargetEnd === null) {
+          this.updatePrediction(this.buildErrorPredictionRecord(predictionRecord, "unable to resolve manual prediction outcome"));
+        } else {
+          const resolvedPredictionRecord = this.resolvePredictionRecord(predictionRecord, referenceValueAtTargetEnd);
+          this.updatePrediction(resolvedPredictionRecord);
+
+          if (resolvedPredictionRecord.isCorrect !== null) {
+            this.appendResolvedOutcome(predictionRecord.asset, resolvedPredictionRecord.isCorrect);
+          }
+        }
+
+        this.clearPendingResolution(predictionId);
+        await this.persistRuntimeState();
+      }
+    }
+  }
+
+  private async runScheduledProcessingCycle(): Promise<void> {
+    if (!this.isProcessing) {
+      this.isProcessing = true;
+      this.refreshLiveStatusFields();
+
+      try {
+        for (const asset of this.supportedAssets) {
+          await this.processHistoricalAsset(asset);
+        }
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : "scheduled processing cycle failed";
+        logger.error(`scheduled processing cycle failed error=${errorMessage}`);
+      } finally {
+        this.isProcessing = false;
+      }
+    }
   }
 
   /**
@@ -604,88 +678,86 @@ export class ModelRuntimeService {
       await this.restorePersistedState();
       await this.snapshotStoreService.start();
       this.refreshLiveStatusFields();
+      this.processingTimer = setInterval(() => {
+        void this.runScheduledProcessingCycle();
+      }, this.processIntervalMs);
       this.isStarted = true;
-      this.trainingTimer = setInterval(() => {
-        void this.runScheduledTrainingCycle();
-      }, this.trainingIntervalMs);
-      void this.runScheduledTrainingCycle();
+      void this.runScheduledProcessingCycle();
     }
   }
 
   public async stop(): Promise<void> {
-    if (this.trainingTimer !== null) {
-      clearInterval(this.trainingTimer);
-      this.trainingTimer = null;
+    if (this.processingTimer !== null) {
+      clearInterval(this.processingTimer);
+      this.processingTimer = null;
     }
 
-    if (this.isStarted) {
-      await this.snapshotStoreService.stop();
-      this.trendArtifactRegistry.clear();
-      this.clobArtifactRegistry.clear();
-      this.isStarted = false;
-    }
-  }
+    [...this.pendingResolutionTimerRegistry.keys()].forEach((predictionId) => {
+      this.clearPendingResolution(predictionId);
+    });
 
-  public async runTrainingCycle(): Promise<void> {
-    if (!this.isTrainingCycleRunning) {
-      this.markTrainingStarted(new Date().toISOString());
-
-      try {
-        const cycleStartedAt = Date.now();
-        const passSummary = await this.runIncrementalCatchupCycle();
-        this.isTrainingCycleRunning = false;
-        logger.info(
-          `training cycle completed trendModels=${this.trendArtifactRegistry.size} clobModels=${this.clobArtifactRegistry.size} historical=${passSummary.historicalCount} live=${this.snapshotStoreService.getLiveSnapshots().length} trendSamples=${passSummary.trendSampleCount} clobSamples=${passSummary.clobSampleCount} passes=${passSummary.passCount} durationMs=${Date.now() - cycleStartedAt}`,
-        );
-      } catch (error) {
-        logger.error(`training cycle catch error=${error instanceof Error ? error.message : "unknown error"}`);
-        this.markTrainingFailed(error);
-      }
-    }
+    await this.snapshotStoreService.stop();
+    this.isStarted = false;
   }
 
   public getStatusPayload(): ModelStatusPayload {
-    const models = [...this.statusRegistry.values()].sort((leftStatus, rightStatus) => leftStatus.modelKey.localeCompare(rightStatus.modelKey));
-    return {
-      isTrainingCycleRunning: this.isTrainingCycleRunning,
-      lastTrainingCycleAt: this.lastTrainingCycleAt,
-      latestSnapshotAt: models.at(0)?.latestSnapshotAt || null,
-      liveSnapshotCount: models.at(0)?.liveSnapshotCount || 0,
-      models,
+    const modelStatusPayload: ModelStatusPayload = {
+      assets: [...this.statusRegistry.values()],
+      isProcessing: this.isProcessing,
+      lastHistoricalBlockCompletedAt: this.lastHistoricalBlockCompletedAt,
     };
+    return modelStatusPayload;
   }
 
-  public getModelStatus(asset: ModelAsset, window: ModelWindow): ModelStatus {
-    return this.getStatus(this.buildModelKey(asset, window));
+  public getAssetStatus(asset: ModelAsset): ModelStatus {
+    const modelStatus = this.getStatus(asset);
+    return modelStatus;
+  }
+
+  public getPredictionRecords(): ModelPredictionRecordPayload {
+    const predictions = [...this.predictionRegistry.values()]
+      .sort((leftPrediction, rightPrediction) => Date.parse(rightPrediction.issuedAt) - Date.parse(leftPrediction.issuedAt))
+      .slice(0, RECENT_PREDICTION_LIMIT);
+    const modelPredictionRecordPayload: ModelPredictionRecordPayload = {
+      predictions,
+    };
+    return modelPredictionRecordPayload;
   }
 
   public async predict(request: ModelPredictionRequest): Promise<ModelPredictionPayload> {
-    const modelKey = this.buildModelKey(request.asset, request.window);
-    const trendArtifact = this.trendArtifactRegistry.get(request.asset) || null;
-    const clobArtifact = this.clobArtifactRegistry.get(modelKey) || null;
-    const predictionInput = this.modelFeatureService.buildPredictionInput(this.snapshotStoreService.getLiveSnapshots(), request);
-
-    if (trendArtifact === null || clobArtifact === null) {
-      throw new Error(`no remote model available for ${modelKey}`);
+    const asset = request.asset;
+    const artifact = this.artifactRegistry.get(asset) || null;
+    const liveSnapshots = this.snapshotStoreService.getLiveSnapshots();
+    const predictionSnapshots = this.modelFeatureService.buildLivePredictionSnapshots(liveSnapshots);
+    const predictionInput = this.modelFeatureService.buildPredictionInput(asset, predictionSnapshots);
+    if (artifact === null) {
+      throw new Error(`no trained model available for ${asset}`);
     }
 
     if (predictionInput === null) {
-      throw new Error(`insufficient live snapshots for ${modelKey}`);
+      throw new Error(`insufficient live context for ${asset}`);
     }
 
-    const trendPrediction = await this.modelTrainingService.predictTrend(trendArtifact, predictionInput.trendInput);
-    const clobPrediction = await this.modelTrainingService.predictClob(clobArtifact, predictionInput.clobInput);
-    const fusionPayload = await this.modelCostService.buildFusionPayload(
-      predictionInput,
-      {
-        predictedReturn: trendPrediction.predictedValue,
-        probabilities: trendPrediction.probabilities,
-      },
-      {
-        predictedUpMid: clobPrediction.predictedValue,
-        probabilities: clobPrediction.probabilities,
-      },
+    const prediction = await this.modelTrainingService.predictAsset(artifact, predictionInput);
+    const issuedAt = predictionInput.decisionTime;
+    const predictionRecord = this.buildPredictionRecord(
+      asset,
+      "manual",
+      issuedAt,
+      issuedAt - config.MODEL_PREDICTION_CONTEXT_MS,
+      issuedAt,
+      predictionInput.currentChainlinkPrice || predictionInput.currentExchangePrice,
+      prediction.predictedReturn,
+      prediction.predictedProbability,
     );
-    return this.buildPredictionPayload(predictionInput, trendPrediction, clobPrediction, fusionPayload);
+    this.registerPrediction(predictionRecord);
+    this.schedulePendingResolution(predictionRecord.predictionId);
+    await this.persistRuntimeState();
+    const modelPredictionPayload: ModelPredictionPayload = {
+      liveSnapshotCount: liveSnapshots.length,
+      prediction: predictionRecord,
+    };
+
+    return modelPredictionPayload;
   }
 }
