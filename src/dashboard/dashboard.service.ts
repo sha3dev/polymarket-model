@@ -59,7 +59,7 @@ export class DashboardService {
       .shell {
         max-width: 1560px;
         margin: 0 auto;
-        padding: 16px 16px 24px;
+        padding: 10px 12px 18px;
       }
       .panel {
         background: var(--surface);
@@ -75,7 +75,7 @@ export class DashboardService {
         align-items: start;
       }
       .intro {
-        padding: 14px 16px;
+        padding: 10px 12px;
       }
       .eyebrow {
         display: inline-flex;
@@ -91,16 +91,16 @@ export class DashboardService {
         color: var(--accent);
       }
       h1 {
-        margin: 10px 0 4px;
-        font-size: clamp(22px, 2vw, 34px);
+        margin: 8px 0 2px;
+        font-size: clamp(18px, 1.8vw, 28px);
         line-height: 1.02;
         letter-spacing: -0.03em;
       }
       .lede {
         margin: 0;
         color: var(--muted);
-        font-size: 13px;
-        line-height: 1.45;
+        font-size: 12px;
+        line-height: 1.35;
       }
       .summary-grid {
         display: grid;
@@ -128,7 +128,7 @@ export class DashboardService {
         line-height: 1.15;
       }
       .predict-card {
-        padding: 14px;
+        padding: 10px 12px;
       }
       .predict-grid {
         display: grid;
@@ -167,7 +167,7 @@ export class DashboardService {
         cursor: wait;
       }
       .section {
-        margin-top: 12px;
+        margin-top: 10px;
       }
       .section-head {
         display: flex;
@@ -186,6 +186,14 @@ export class DashboardService {
       .section-note {
         color: var(--muted);
         font-size: 11px;
+      }
+      .hint {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        cursor: help;
+        text-decoration: underline dotted rgba(17, 32, 42, 0.26);
+        text-underline-offset: 2px;
       }
       .models-shell {
         overflow: auto;
@@ -267,6 +275,11 @@ export class DashboardService {
         font-size: 11px;
         text-transform: uppercase;
         letter-spacing: 0.08em;
+      }
+      .result-meta {
+        margin-top: 8px;
+        color: var(--muted);
+        font-size: 11px;
       }
       .result-kv {
         display: grid;
@@ -397,6 +410,27 @@ export class DashboardService {
         return String(value);
       };
 
+      const formatTimestamp = (value) => {
+        let formattedValue = "n/a";
+
+        if (value !== null && value !== undefined && value !== "") {
+          const timestamp = new Date(value);
+
+          if (!Number.isNaN(timestamp.getTime())) {
+            formattedValue = timestamp.toLocaleString([], {
+              year: "numeric",
+              month: "2-digit",
+              day: "2-digit",
+              hour: "2-digit",
+              minute: "2-digit",
+              second: "2-digit",
+            });
+          }
+        }
+
+        return formattedValue;
+      };
+
       const buildStateClass = (value) => {
         return ["ready", "training", "error", "idle"].includes(value) ? value : "idle";
       };
@@ -406,8 +440,8 @@ export class DashboardService {
           { label: "Service", value: state.appInfo?.serviceName || "${config.SERVICE_NAME}" },
           { label: "Training Cycle", value: statusPayload.isTrainingCycleRunning ? "Running" : "Idle" },
           { label: "Live Snapshots", value: statusPayload.liveSnapshotCount ?? 0 },
-          { label: "Latest Snapshot", value: statusPayload.latestSnapshotAt || "n/a" },
-          { label: "Last Training", value: statusPayload.lastTrainingCycleAt || "n/a" },
+          { label: "Latest Snapshot", value: formatTimestamp(statusPayload.latestSnapshotAt) },
+          { label: "Last Training", value: formatTimestamp(statusPayload.lastTrainingCycleAt) },
           { label: "Markets", value: statusPayload.models.length },
         ];
         summaryGrid.innerHTML = summaryItems.map((item) => \`<div class="metric"><div class="metric-label">\${item.label}</div><div class="metric-value">\${item.value}</div></div>\`).join("");
@@ -423,17 +457,17 @@ export class DashboardService {
           <table class="models-table">
             <thead>
               <tr>
-                <th>Model</th>
-                <th>State</th>
-                <th>Trend</th>
-                <th>CLOB</th>
-                <th>Seq</th>
-                <th>Features</th>
-                <th>Samples</th>
-                <th>Validation</th>
-                <th>Latest</th>
-                <th>Market</th>
-                <th>Error</th>
+                <th><span class="hint" title="Asset-window identifier for this market model.">Model</span></th>
+                <th><span class="hint" title="Current runtime state for this market plus whether trend and CLOB heads are aligned or skewed.">State</span></th>
+                <th><span class="hint" title="Trend head version and the asset key used by the crypto trend model.">Trend</span></th>
+                <th><span class="hint" title="CLOB head version used for this exact asset-window market.">CLOB</span></th>
+                <th><span class="hint" title="Sequence lengths fed into the trend and CLOB models, shown as trend / clob.">Seq</span></th>
+                <th><span class="hint" title="Feature counts used by the trend and CLOB models, shown as trend / clob.">Features</span></th>
+                <th><span class="hint" title="Training and validation sample counts used by the latest fitted head, shown as train / valid.">Samples</span></th>
+                <th><span class="hint" title="End timestamp of the latest validation window used to evaluate the current model.">Validation</span></th>
+                <th><span class="hint" title="Newest live snapshot time currently buffered in memory, plus live snapshot count.">Latest</span></th>
+                <th><span class="hint" title="Current active Polymarket market slug associated with this asset-window.">Market</span></th>
+                <th><span class="hint" title="Most recent runtime or remote-training error for this market.">Error</span></th>
               </tr>
             </thead>
             <tbody>
@@ -464,12 +498,12 @@ export class DashboardService {
                   <td class="wrap">
                     <div class="stack">
                       <span class="subtle">end</span>
-                      <span>\${model.lastValidationWindowEnd || "n/a"}</span>
+                      <span>\${formatTimestamp(model.lastValidationWindowEnd)}</span>
                     </div>
                   </td>
                   <td class="wrap">
                     <div class="stack">
-                      <span>\${model.latestSnapshotAt || "n/a"}</span>
+                      <span>\${formatTimestamp(model.latestSnapshotAt)}</span>
                       <span class="subtle">live \${model.liveSnapshotCount}</span>
                     </div>
                   </td>
@@ -486,35 +520,36 @@ export class DashboardService {
         predictionResult.className = "result-layout";
         predictionResult.innerHTML = \`
           <div class="panel result-box">
-            <h3>Trend</h3>
+            <h3><span class="hint" title="Trend head output derived from crypto market features. It forecasts the underlying asset rather than the Polymarket book.">Trend</span></h3>
             <div class="result-kv">
-              <span>Predicted return</span><span>\${formatValue(payload.trend.predictedReturn)}</span>
-              <span>Fair UP probability</span><span>\${formatValue(payload.trend.fairUpProbability)}</span>
-              <span>UP / FLAT / DOWN</span><span>\${formatValue(payload.trend.probabilities.up)} / \${formatValue(payload.trend.probabilities.flat)} / \${formatValue(payload.trend.probabilities.down)}</span>
-              <span>Chainlink fresh</span><span>\${payload.trend.isChainlinkFresh ? "yes" : "no"}</span>
+              <span class="hint" title="Predicted log-return of the underlying asset over the configured forecast horizon.">Predicted return</span><span>\${formatValue(payload.trend.predictedReturn)}</span>
+              <span class="hint" title="Trend forecast translated into a fair probability for the UP side.">Fair UP probability</span><span>\${formatValue(payload.trend.fairUpProbability)}</span>
+              <span class="hint" title="Class probabilities from the trend head for up, flat, and down.">UP / FLAT / DOWN</span><span>\${formatValue(payload.trend.probabilities.up)} / \${formatValue(payload.trend.probabilities.flat)} / \${formatValue(payload.trend.probabilities.down)}</span>
+              <span class="hint" title="Whether the Chainlink input used for this prediction is considered fresh enough.">Chainlink fresh</span><span>\${payload.trend.isChainlinkFresh ? "yes" : "no"}</span>
             </div>
           </div>
           <div class="panel result-box">
-            <h3>CLOB</h3>
+            <h3><span class="hint" title="CLOB head output derived from Polymarket book structure and fair-value features.">CLOB</span></h3>
             <div class="result-kv">
-              <span>Current UP midpoint</span><span>\${formatValue(payload.clob.currentUpMid)}</span>
-              <span>Predicted UP midpoint</span><span>\${formatValue(payload.clob.predictedUpMid)}</span>
-              <span>Edge</span><span>\${formatValue(payload.clob.edge)}</span>
-              <span>Book fresh</span><span>\${payload.clob.isOrderBookFresh ? "yes" : "no"}</span>
+              <span class="hint" title="Current midpoint of the UP token order book.">Current UP midpoint</span><span>\${formatValue(payload.clob.currentUpMid)}</span>
+              <span class="hint" title="Predicted future midpoint of the UP token after decoding the regression output.">Predicted UP midpoint</span><span>\${formatValue(payload.clob.predictedUpMid)}</span>
+              <span class="hint" title="Predicted midpoint minus current midpoint. Positive values favor higher UP prices.">Edge</span><span>\${formatValue(payload.clob.edge)}</span>
+              <span class="hint" title="Whether the live Polymarket order book is considered fresh enough for trading logic.">Book fresh</span><span>\${payload.clob.isOrderBookFresh ? "yes" : "no"}</span>
             </div>
           </div>
           <div class="panel result-box">
-            <h3>Decision</h3>
+            <h3><span class="hint" title="Final fused decision after combining trend, CLOB, liquidity, spread, slippage, and fee constraints.">Decision</span></h3>
             <div class="result-kv">
-              <span>Suggested side</span><span>\${payload.fusion.suggestedSide}</span>
-              <span>Should trade</span><span>\${payload.fusion.shouldTrade ? "yes" : "no"}</span>
-              <span>Score UP</span><span>\${formatValue(payload.fusion.scoreUp)}</span>
-              <span>Score DOWN</span><span>\${formatValue(payload.fusion.scoreDown)}</span>
-              <span>Mode</span><span>\${payload.fusion.mode}</span>
+              <span class="hint" title="Side selected by the fused scorer after all vetoes and cost adjustments.">Suggested side</span><span>\${payload.fusion.suggestedSide}</span>
+              <span class="hint" title="Final yes or no trade flag after costs and vetoes are applied.">Should trade</span><span>\${payload.fusion.shouldTrade ? "yes" : "no"}</span>
+              <span class="hint" title="Cost-aware score for buying the UP side. Higher is better.">Score UP</span><span>\${formatValue(payload.fusion.scoreUp)}</span>
+              <span class="hint" title="Cost-aware score for the opposite side. Higher is better.">Score DOWN</span><span>\${formatValue(payload.fusion.scoreDown)}</span>
+              <span class="hint" title="Fusion mode used to produce the decision, such as full or clob_only.">Mode</span><span>\${payload.fusion.mode}</span>
             </div>
+            <div class="result-meta">Generated \${formatTimestamp(payload.generatedAt)} · live \${payload.liveSnapshotCount}</div>
           </div>
           <div class="panel result-box">
-            <h3>Vetoes / Reasons</h3>
+            <h3><span class="hint" title="Hard vetoes block trading. Reasons explain the decision path or missing inputs.">Vetoes / Reasons</span></h3>
             \${payload.fusion.vetoes.length === 0 ? "<div class=\\"subtle\\">No vetoes</div>" : "<ul class=\\"result-list\\">" + payload.fusion.vetoes.map((item) => "<li>" + item + "</li>").join("") + "</ul>"}
             \${payload.fusion.reasons.length === 0 ? "<div class=\\"subtle\\" style=\\"margin-top:8px;\\">No extra reasons</div>" : "<ul class=\\"result-list\\" style=\\"margin-top:8px;\\">" + payload.fusion.reasons.map((item) => "<li>" + item + "</li>").join("") + "</ul>"}
           </div>
