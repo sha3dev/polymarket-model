@@ -3,8 +3,8 @@
 Crypto-only long-running Node service that:
 
 - reads historical snapshots from the collector in contiguous 5-minute blocks
-- makes one automatic prediction from the first 30 seconds of each block
-- scores that prediction on the following 30 seconds
+- uses the 30 seconds immediately before each block to make one automatic prediction
+- scores that prediction on the first 30 seconds inside that block
 - trains a remote model in `tensorflow-api` with that 5-minute block
 - keeps a live in-memory snapshot buffer through `@sha3/polymarket-snapshot`
 - exposes a dashboard and HTTP API for live manual predictions
@@ -44,8 +44,8 @@ It works in two parallel modes:
 
 - historical automatic mode
   - uses closed 5-minute blocks from the collector
-  - makes one prediction from the first 30 seconds
-  - checks whether that prediction was right on the next 30 seconds
+  - uses the 30 seconds immediately before the block starts as prediction context
+  - checks whether that prediction was right on the first 30 seconds inside the block
   - then trains the model with the full block
 - live manual mode
   - keeps the most recent real-time snapshots in memory
@@ -60,7 +60,7 @@ The result is a simple crypto-direction training and evaluation runtime.
 - historical catch-up that resumes from the last persisted collector cursor
 - automatic prediction before training on every closed 5-minute block
 - live manual prediction from the newest snapshots in memory
-- rolling hit-rate over the last 20 resolved predictions per asset
+- rolling hit-rate over the last 2 hours of resolved predictions per asset
 - remote training and inference through `tensorflow-api`
 - compact operator dashboard at `GET /dashboard`
 
@@ -70,9 +70,9 @@ Each historical cycle uses a block of 5 minutes of market data.
 
 Inside that block:
 
-1. look only at the first 30 seconds
-2. ask the model whether the price is likely to go up or down in the next 30 seconds
-3. compare that guess with what actually happened in those next 30 seconds
+1. look at the 30 seconds immediately before the block opens
+2. ask the model whether the price is likely to go up or down in the first 30 seconds of the new block
+3. compare that guess with what actually happened in those first 30 seconds
 4. record correct or incorrect
 5. train the model with the full 5-minute block
 
@@ -346,6 +346,8 @@ Returns one asset status.
 
 Returns recent prediction records across all assets.
 
+The response is capped to the latest 50 predictions, newest first.
+
 ### `POST /predict`
 
 Runs a manual live prediction using the latest real-time snapshots already buffered in memory.
@@ -364,10 +366,10 @@ For each asset:
 
 1. read the persisted collector cursor `lastCollectorFromAt`
 2. define the next closed 5-minute block
-3. request that block from the collector
-4. use the first 30 seconds to build one prediction context
-5. run one automatic prediction
-6. score that prediction on the immediately following 30 seconds
+3. request that block from the collector together with the 30 seconds immediately before it
+4. use those previous 30 seconds to build one prediction context
+5. run one automatic prediction for the first 30 seconds of the block
+6. score that prediction on that first 30-second slice
 7. append the result to the rolling hit-rate buffer
 8. build training samples from the full 5-minute block
 9. send only that block to `tensorflow-api`
@@ -555,8 +557,8 @@ Every top-level config key exported by `src/config.ts`:
   - compatibility alias used by some internal feature utilities
 - `MODEL_DECISION_INTERVAL_MS`
   - compatibility alias aligned with the context interval
-- `MODEL_ROLLING_HIT_RATE_SIZE`
-  - size of the rolling resolved-prediction window
+- `MODEL_ROLLING_HIT_RATE_WINDOW_MS`
+  - time span of the rolling resolved-prediction window, default 2 hours
 - `MODEL_CHAINLINK_STALE_MS`
   - maximum age for Chainlink values to be treated as fresh
 - `MODEL_MIN_SAMPLE_COUNT`

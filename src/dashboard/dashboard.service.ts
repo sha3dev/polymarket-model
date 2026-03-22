@@ -186,6 +186,8 @@ export class DashboardService {
       .badge-error { background: rgba(192,57,43,0.14); color: var(--error); }
       .badge-manual { background: rgba(15,118,110,0.14); color: var(--accent); }
       .badge-automatic { background: rgba(18,33,44,0.1); color: var(--ink); }
+      .badge-yes { background: rgba(29,122,79,0.12); color: var(--ready); }
+      .badge-no { background: rgba(192,57,43,0.14); color: var(--error); }
       .hint {
         cursor: help;
         text-decoration: underline dotted rgba(18,33,44,0.3);
@@ -244,8 +246,10 @@ export class DashboardService {
         .summary-grid,
         .help-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       }
+      @media (max-width: 900px) {
+        .summary-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      }
       @media (max-width: 720px) {
-        .summary-grid,
         .help-grid { grid-template-columns: 1fr; }
       }
     </style>
@@ -300,15 +304,13 @@ export class DashboardService {
               <tr>
                 <th><span class="hint" title="When the prediction was issued.">Time</span></th>
                 <th><span class="hint" title="Crypto asset that was predicted.">Asset</span></th>
-                <th><span class="hint" title="Automatic means historical block evaluation. Manual means dashboard-triggered live prediction.">Source</span></th>
+                <th><span class="hint" title="A means automatic historical prediction. M means manual live prediction from the dashboard.">Src</span></th>
                 <th><span class="hint" title="Pending waits for the 30-second target to end. Resolved has a final result. Error failed before resolution.">Status</span></th>
                 <th><span class="hint" title="Direction forecast produced by the model at prediction time.">Predicted</span></th>
-                <th><span class="hint" title="Direction that actually happened after the 30-second target window.">Actual</span></th>
+                <th><span class="hint" title="Direction that actually happened after the 30-second target window.">Real</span></th>
                 <th><span class="hint" title="Whether the predicted direction matched the final direction.">Correct</span></th>
-                <th><span class="hint" title="Model probability assigned to the price going up when the prediction was made.">Pred Up</span></th>
-                <th><span class="hint" title="Model probability assigned to the price going down when the prediction was made.">Pred Down</span></th>
-                <th><span class="hint" title="Final realized up value. 1 means the outcome was up, 0 means it was not.">Final Up</span></th>
-                <th><span class="hint" title="Final realized down value. 1 means the outcome was down, 0 means it was not.">Final Down</span></th>
+                <th><span class="hint" title="The model confidence at prediction time. U means up probability, D means down probability, and F means the model was effectively tied so the prediction is flat.">Pred</span></th>
+                <th><span class="hint" title="Final realized direction after the 30-second target window closed.">Result</span></th>
                 <th><span class="hint" title="The 30-second window whose final direction decides whether the prediction was correct.">Target Window</span></th>
               </tr>
             </thead>
@@ -329,7 +331,7 @@ export class DashboardService {
               <dt>5-minute block</dt>
               <dd>The collector history is cut into contiguous closed windows of five minutes each. The service resumes from the last saved collector cursor after restart.</dd>
               <dt>Automatic prediction</dt>
-              <dd>For each closed block, the model uses only the first 30 seconds to guess the next 30 seconds. That guess is scored before the block is used for training.</dd>
+              <dd>For each closed block, the model uses the 30 seconds immediately before the block opens to predict what will happen in the first 30 seconds inside that block. That guess is scored before the block is used for training.</dd>
               <dt>Collector cursor</dt>
               <dd>This is the exact point from which the next historical training request will continue. It is persisted locally.</dd>
             </dl>
@@ -353,7 +355,7 @@ export class DashboardService {
               <dt>Final Up / Final Down</dt>
               <dd>The realized binary outcome after 30 seconds. One side becomes 1 and the other becomes 0.</dd>
               <dt>Rolling hit-rate</dt>
-              <dd>The share of correct resolved predictions over the last 20 resolved predictions for that asset.</dd>
+              <dd>The share of correct resolved predictions over the last 2 hours for that asset.</dd>
             </dl>
           </article>
         </div>
@@ -377,6 +379,17 @@ export class DashboardService {
         if (typeof value === "string" && value.length > 0) {
           const parsedDate = new Date(value);
           formattedValue = Number.isNaN(parsedDate.getTime()) ? value : parsedDate.toLocaleString();
+        }
+        return formattedValue;
+      };
+
+      const formatTime = (value) => {
+        let formattedValue = "—";
+        if (typeof value === "string" && value.length > 0) {
+          const parsedDate = new Date(value);
+          formattedValue = Number.isNaN(parsedDate.getTime())
+            ? value
+            : parsedDate.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
         }
         return formattedValue;
       };
@@ -411,7 +424,44 @@ export class DashboardService {
 
       const buildSourceBadge = (value) => {
         const cssClass = value === "manual" ? "badge badge-manual" : "badge badge-automatic";
-        return '<span class="' + cssClass + '">' + escapeHtml(value) + "</span>";
+        const label = value === "manual" ? "M" : "A";
+        return '<span class="' + cssClass + '">' + escapeHtml(label) + "</span>";
+      };
+
+      const buildOutcomeBadge = (value) => {
+        let badgeHtml = '<span class="muted">—</span>';
+        if (value === "up") {
+          badgeHtml = '<span class="badge badge-yes">up</span>';
+        }
+        if (value === "down") {
+          badgeHtml = '<span class="badge badge-no">down</span>';
+        }
+        if (value === "flat") {
+          badgeHtml = '<span class="badge badge-waiting">flat</span>';
+        }
+        return badgeHtml;
+      };
+
+      const buildCorrectBadge = (value) => {
+        let badgeHtml = '<span class="muted">Pending</span>';
+        if (value === true) {
+          badgeHtml = '<span class="badge badge-yes">yes</span>';
+        }
+        if (value === false) {
+          badgeHtml = '<span class="badge badge-no">no</span>';
+        }
+        return badgeHtml;
+      };
+
+      const buildCompactPredictionValue = (prediction) => {
+        const upValue = prediction.upValueAtPrediction || 0;
+        const downValue = prediction.downValueAtPrediction || 0;
+        const isFlat = Math.abs(upValue - downValue) <= 0.0005;
+        const isUpDominant = upValue > downValue;
+        const directionLabel = isFlat ? "F" : isUpDominant ? "U" : "D";
+        const numericValue = isFlat ? upValue : isUpDominant ? upValue : downValue;
+        const compactPredictionValue = directionLabel + " " + formatNumber(numericValue);
+        return compactPredictionValue;
       };
 
       const buildSummaryMetrics = () => {
@@ -452,15 +502,15 @@ export class DashboardService {
             "<tr>" +
               "<td>" + escapeHtml(asset.asset.toUpperCase()) + "</td>" +
               "<td>" + buildStateBadge(asset.state) + "</td>" +
-              "<td>" + escapeHtml(formatDate(asset.lastCollectorFromAt)) + "</td>" +
-              "<td>" + escapeHtml((asset.currentBlockStartAt && asset.currentBlockEndAt) ? formatDate(asset.currentBlockStartAt) + " → " + formatDate(asset.currentBlockEndAt) : "—") + "</td>" +
+              "<td>" + escapeHtml(formatTime(asset.lastCollectorFromAt)) + "</td>" +
+              "<td>" + escapeHtml((asset.currentBlockStartAt && asset.currentBlockEndAt) ? formatTime(asset.currentBlockStartAt) + "→" + formatTime(asset.currentBlockEndAt) : "—") + "</td>" +
               "<td>" + buildStateBadge(asset.isLiveReady ? "ready" : "waiting") + "</td>" +
-              "<td>" + escapeHtml(formatDate(asset.lastLiveSnapshotAt)) + "</td>" +
+              "<td>" + escapeHtml(formatTime(asset.lastLiveSnapshotAt)) + "</td>" +
               "<td>" + escapeHtml(String(asset.trainingCount)) + "</td>" +
-              "<td>" + escapeHtml(formatDate(asset.lastTrainingAt)) + "</td>" +
+              "<td>" + escapeHtml(formatTime(asset.lastTrainingAt)) + "</td>" +
               "<td>" + escapeHtml(formatPercent(asset.rollingHitRate)) + "</td>" +
               "<td>" + escapeHtml(String(asset.rollingPredictionCount)) + "</td>" +
-              "<td class='wrap'>" + escapeHtml(lastPredictionText) + "</td>" +
+              "<td class='wrap'>" + escapeHtml(latestPrediction === null ? "—" : latestPrediction.predictedDirection + " @ " + formatTime(latestPrediction.issuedAt)) + "</td>" +
               "<td class='wrap'>" + escapeHtml(lastResultText) + "</td>" +
               "<td class='wrap'>" + escapeHtml(asset.lastError || "—") + "</td>" +
               "<td><button data-asset='" + escapeHtml(asset.asset) + "'" + (buttonDisabled ? " disabled" : "") + ">" + escapeHtml(buttonLabel) + "</button></td>" +
@@ -500,18 +550,16 @@ export class DashboardService {
       const renderPredictions = () => {
         predictionTableBody.innerHTML = state.predictions.map((prediction) => (
           "<tr>" +
-            "<td>" + escapeHtml(formatDate(prediction.issuedAt)) + "</td>" +
+            "<td>" + escapeHtml(formatTime(prediction.issuedAt)) + "</td>" +
             "<td>" + escapeHtml(prediction.asset.toUpperCase()) + "</td>" +
             "<td>" + buildSourceBadge(prediction.source) + "</td>" +
             "<td>" + buildStateBadge(prediction.status === "pending" ? "waiting" : prediction.status === "resolved" ? "ready" : "error") + "</td>" +
-            "<td>" + escapeHtml(prediction.predictedDirection) + "</td>" +
-            "<td>" + escapeHtml(prediction.actualDirection || "—") + "</td>" +
-            "<td>" + escapeHtml(prediction.isCorrect === null ? "Pending" : prediction.isCorrect ? "Yes" : "No") + "</td>" +
-            "<td>" + escapeHtml(formatNumber(prediction.upValueAtPrediction)) + "</td>" +
-            "<td>" + escapeHtml(formatNumber(prediction.downValueAtPrediction)) + "</td>" +
-            "<td>" + escapeHtml(formatNumber(prediction.upValueAtTargetEnd)) + "</td>" +
-            "<td>" + escapeHtml(formatNumber(prediction.downValueAtTargetEnd)) + "</td>" +
-            "<td class='wrap'>" + escapeHtml(formatDate(prediction.targetStartAt) + " → " + formatDate(prediction.targetEndAt)) + "</td>" +
+            "<td>" + buildOutcomeBadge(prediction.predictedDirection) + "</td>" +
+            "<td>" + buildOutcomeBadge(prediction.actualDirection) + "</td>" +
+            "<td>" + buildCorrectBadge(prediction.isCorrect) + "</td>" +
+            "<td>" + escapeHtml(buildCompactPredictionValue(prediction)) + "</td>" +
+            "<td>" + buildOutcomeBadge(prediction.actualDirection) + "</td>" +
+            "<td class='wrap'>" + escapeHtml(formatTime(prediction.targetStartAt) + "→" + formatTime(prediction.targetEndAt)) + "</td>" +
           "</tr>"
         )).join("");
       };

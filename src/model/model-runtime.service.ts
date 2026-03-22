@@ -18,10 +18,12 @@ import type {
   ModelArtifact,
   ModelAsset,
   ModelDirectionProbability,
+  ModelPredictedDirection,
   ModelPredictionPayload,
   ModelPredictionRecord,
   ModelPredictionRecordPayload,
   ModelPredictionRequest,
+  ModelRollingPredictionOutcome,
   ModelRuntimeStateAssetSnapshot,
   ModelRuntimeStateSnapshot,
   ModelStatus,
@@ -36,7 +38,8 @@ import { ModelTrainingService } from "./model-training.service.ts";
  */
 
 const UNIX_EPOCH_ISO = "1970-01-01T00:00:00.000Z";
-const RECENT_PREDICTION_LIMIT = 100;
+const RECENT_PREDICTION_LIMIT = 50;
+const PREDICTION_TIE_EPSILON = 0.0005;
 
 /**
  * @section types
@@ -48,7 +51,7 @@ type ModelRuntimeServiceOptions = {
   modelRuntimeStateService: ModelRuntimeStateService;
   modelTrainingService: ModelTrainingService;
   processIntervalMs: number;
-  rollingHitRateSize: number;
+  rollingHitRateWindowMs: number;
   shouldLogTrainingProgress: boolean;
   shouldRestoreOnStart: boolean;
   snapshotStoreService: SnapshotStoreService;
@@ -74,7 +77,7 @@ export class ModelRuntimeService {
 
   private readonly processIntervalMs: number;
 
-  private readonly rollingHitRateSize: number;
+  private readonly rollingHitRateWindowMs: number;
 
   private readonly shouldLogTrainingProgress: boolean;
 
@@ -92,7 +95,7 @@ export class ModelRuntimeService {
 
   private readonly predictionRegistry: Map<string, ModelPredictionRecord>;
 
-  private readonly rollingOutcomeRegistry: Map<ModelAsset, boolean[]>;
+  private readonly rollingOutcomeRegistry: Map<ModelAsset, ModelRollingPredictionOutcome[]>;
 
   private readonly statusRegistry: Map<ModelAsset, ModelStatus>;
 
@@ -114,7 +117,7 @@ export class ModelRuntimeService {
     this.modelRuntimeStateService = options.modelRuntimeStateService;
     this.modelTrainingService = options.modelTrainingService;
     this.processIntervalMs = options.processIntervalMs;
-    this.rollingHitRateSize = options.rollingHitRateSize;
+    this.rollingHitRateWindowMs = options.rollingHitRateWindowMs;
     this.shouldLogTrainingProgress = options.shouldLogTrainingProgress;
     this.shouldRestoreOnStart = options.shouldRestoreOnStart;
     this.snapshotStoreService = options.snapshotStoreService;
@@ -123,7 +126,7 @@ export class ModelRuntimeService {
     this.assetPredictionRegistry = new Map<ModelAsset, string[]>();
     this.pendingResolutionTimerRegistry = new Map<string, ReturnType<typeof setTimeout>>();
     this.predictionRegistry = new Map<string, ModelPredictionRecord>();
-    this.rollingOutcomeRegistry = new Map<ModelAsset, boolean[]>();
+    this.rollingOutcomeRegistry = new Map<ModelAsset, ModelRollingPredictionOutcome[]>();
     this.statusRegistry = new Map<ModelAsset, ModelStatus>();
     this.isProcessing = false;
     this.isStarted = false;
@@ -144,7 +147,7 @@ export class ModelRuntimeService {
       modelRuntimeStateService: ModelRuntimeStateService.createDefault(),
       modelTrainingService: ModelTrainingService.createDefault(modelFeatureService.buildFeatureNames()),
       processIntervalMs: config.MODEL_PROCESS_INTERVAL_MS,
-      rollingHitRateSize: config.MODEL_ROLLING_HIT_RATE_SIZE,
+      rollingHitRateWindowMs: config.MODEL_ROLLING_HIT_RATE_WINDOW_MS,
       shouldLogTrainingProgress: config.MODEL_LOG_TRAINING_PROGRESS,
       shouldRestoreOnStart: config.MODEL_RESTORE_ON_START,
       snapshotStoreService: SnapshotStoreService.createDefault(),
@@ -205,6 +208,19 @@ export class ModelRuntimeService {
       ...this.getStatus(asset),
       ...statusPatch,
     });
+  }
+
+  private buildRollingWindowStartAt(referenceTime: number): number {
+    const rollingWindowStartAt = referenceTime - this.rollingHitRateWindowMs;
+    return rollingWindowStartAt;
+  }
+
+  private pruneRollingOutcomes(asset: ModelAsset, referenceTime: number): void {
+    const rollingWindowStartAt = this.buildRollingWindowStartAt(referenceTime);
+    const rollingPredictionOutcomes = (this.rollingOutcomeRegistry.get(asset) || []).filter(
+      (outcome) => Date.parse(outcome.resolvedAt) >= rollingWindowStartAt,
+    );
+    this.rollingOutcomeRegistry.set(asset, rollingPredictionOutcomes);
   }
 
   private buildRuntimeStateAssetSnapshot(asset: ModelAsset): ModelRuntimeStateAssetSnapshot {
@@ -290,7 +306,8 @@ export class ModelRuntimeService {
         this.predictionRegistry.set(predictionRecord.predictionId, predictionRecord);
       });
       this.assetPredictionRegistry.set(asset, predictionIds);
-      this.rollingOutcomeRegistry.set(asset, [...(assetState?.rollingPredictionOutcomes || [])].slice(-this.rollingHitRateSize));
+      this.rollingOutcomeRegistry.set(asset, [...(assetState?.rollingPredictionOutcomes || [])]);
+      this.pruneRollingOutcomes(asset, Date.now());
       this.updateStatus(asset, {
         currentBlockEndAt: assetState?.lastProcessedBlockEndAt || null,
         currentBlockStartAt: assetState?.lastProcessedBlockStartAt || null,
@@ -307,8 +324,18 @@ export class ModelRuntimeService {
     }
   }
 
-  private buildPredictionDirection(predictedReturn: number): "down" | "up" {
-    const predictedDirection: "down" | "up" = predictedReturn > 0 ? "up" : "down";
+  private buildPredictionDirection(predictedReturn: number, predictedProbability: ModelDirectionProbability): ModelPredictedDirection {
+    const probabilityGap = Math.abs(predictedProbability.up - predictedProbability.down);
+    let predictedDirection: ModelPredictedDirection = "flat";
+
+    if (probabilityGap > PREDICTION_TIE_EPSILON) {
+      predictedDirection = predictedProbability.up > predictedProbability.down ? "up" : "down";
+    }
+
+    if (!Number.isFinite(predictedProbability.up) || !Number.isFinite(predictedProbability.down)) {
+      predictedDirection = predictedReturn > 0 ? "up" : "down";
+    }
+
     return predictedDirection;
   }
 
@@ -333,8 +360,9 @@ export class ModelRuntimeService {
   private refreshPredictionStatusFields(asset: ModelAsset): void {
     const predictionRecords = this.listAssetPredictions(asset);
     const latestPrediction = predictionRecords.at(-1) || null;
+    this.pruneRollingOutcomes(asset, Date.now());
     const rollingPredictionOutcomes = this.rollingOutcomeRegistry.get(asset) || [];
-    const rollingCorrectCount = rollingPredictionOutcomes.filter((outcome) => outcome).length;
+    const rollingCorrectCount = rollingPredictionOutcomes.filter((outcome) => outcome.isCorrect).length;
     this.updateStatus(asset, {
       lastPredictionAt: latestPrediction?.issuedAt || null,
       lastPredictionSource: latestPrediction?.source || null,
@@ -367,8 +395,15 @@ export class ModelRuntimeService {
   }
 
   private appendResolvedOutcome(asset: ModelAsset, isCorrect: boolean): void {
-    const rollingPredictionOutcomes = [...(this.rollingOutcomeRegistry.get(asset) || []), isCorrect].slice(-this.rollingHitRateSize);
+    const rollingPredictionOutcomes = [
+      ...(this.rollingOutcomeRegistry.get(asset) || []),
+      {
+        isCorrect,
+        resolvedAt: new Date().toISOString(),
+      },
+    ];
     this.rollingOutcomeRegistry.set(asset, rollingPredictionOutcomes);
+    this.pruneRollingOutcomes(asset, Date.now());
     this.refreshPredictionStatusFields(asset);
   }
 
@@ -382,7 +417,7 @@ export class ModelRuntimeService {
     predictedReturn: number,
     predictedProbability: ModelDirectionProbability,
   ): ModelPredictionRecord {
-    const predictedDirection = this.buildPredictionDirection(predictedReturn);
+    const predictedDirection = this.buildPredictionDirection(predictedReturn, predictedProbability);
     const predictionRecord: ModelPredictionRecord = {
       actualDirection: null,
       actualReturn: null,
@@ -416,7 +451,7 @@ export class ModelRuntimeService {
     const referenceValueAtPrediction = predictionRecord.referenceValueAtPrediction || referenceValueAtTargetEnd;
     const actualReturn = referenceValueAtPrediction > 0 ? Math.log(referenceValueAtTargetEnd / referenceValueAtPrediction) : 0;
     const actualDirection = actualReturn > 0 ? "up" : "down";
-    const isCorrect = predictionRecord.predictedDirection === actualDirection;
+    const isCorrect = predictionRecord.predictedDirection !== "flat" && predictionRecord.predictedDirection === actualDirection;
     const resolvedPredictionRecord: ModelPredictionRecord = {
       ...predictionRecord,
       actualDirection,
@@ -477,16 +512,23 @@ export class ModelRuntimeService {
   }
 
   private async readHistoricalBlock(blockStartAt: number, blockEndAt: number): Promise<FlatSnapshot[]> {
+    const historicalFromAt = blockStartAt - config.MODEL_PREDICTION_CONTEXT_MS;
     const historicalSnapshots = await this.collectorClientService.readSnapshots({
-      fromDate: new Date(blockStartAt).toISOString(),
+      fromDate: new Date(historicalFromAt).toISOString(),
       toDate: new Date(blockEndAt).toISOString(),
     });
     return historicalSnapshots;
   }
 
   private readBlockContextSnapshots(snapshots: FlatSnapshot[], blockStartAt: number): FlatSnapshot[] {
-    const blockContextSnapshots = snapshots.filter((snapshot) => snapshot.generated_at < blockStartAt + config.MODEL_PREDICTION_CONTEXT_MS);
+    const contextStartAt = blockStartAt - config.MODEL_PREDICTION_CONTEXT_MS;
+    const blockContextSnapshots = snapshots.filter((snapshot) => snapshot.generated_at >= contextStartAt && snapshot.generated_at < blockStartAt);
     return blockContextSnapshots;
+  }
+
+  private readBlockTrainingSnapshots(snapshots: FlatSnapshot[], blockStartAt: number, blockEndAt: number): FlatSnapshot[] {
+    const blockTrainingSnapshots = snapshots.filter((snapshot) => snapshot.generated_at >= blockStartAt && snapshot.generated_at <= blockEndAt);
+    return blockTrainingSnapshots;
   }
 
   private async runAutomaticPrediction(asset: ModelAsset, blockSnapshots: FlatSnapshot[], blockStartAt: number): Promise<void> {
@@ -501,18 +543,14 @@ export class ModelRuntimeService {
         const predictionRecord = this.buildPredictionRecord(
           asset,
           "automatic",
-          blockStartAt + config.MODEL_PREDICTION_CONTEXT_MS,
           blockStartAt,
-          blockStartAt + config.MODEL_PREDICTION_CONTEXT_MS,
+          blockStartAt - config.MODEL_PREDICTION_CONTEXT_MS,
+          blockStartAt,
           predictionInput.currentChainlinkPrice || predictionInput.currentExchangePrice,
           prediction.predictedReturn,
           prediction.predictedProbability,
         );
-        const referenceValueAtTargetEnd = this.modelFeatureService.readReferenceValue(
-          asset,
-          blockSnapshots,
-          blockStartAt + config.MODEL_PREDICTION_CONTEXT_MS * 2,
-        );
+        const referenceValueAtTargetEnd = this.modelFeatureService.readReferenceValue(asset, blockSnapshots, blockStartAt + config.MODEL_PREDICTION_TARGET_MS);
 
         if (referenceValueAtTargetEnd !== null) {
           const resolvedPredictionRecord = this.resolvePredictionRecord(predictionRecord, referenceValueAtTargetEnd);
@@ -528,8 +566,9 @@ export class ModelRuntimeService {
     }
   }
 
-  private async trainAssetBlock(asset: ModelAsset, blockSnapshots: FlatSnapshot[]): Promise<void> {
-    const trainingSamples = this.modelFeatureService.buildTrainingSamples(asset, blockSnapshots);
+  private async trainAssetBlock(asset: ModelAsset, blockSnapshots: FlatSnapshot[], blockStartAt: number, blockEndAt: number): Promise<void> {
+    const trainingSnapshots = this.readBlockTrainingSnapshots(blockSnapshots, blockStartAt, blockEndAt);
+    const trainingSamples = this.modelFeatureService.buildTrainingSamples(asset, trainingSnapshots);
     const trainingResult = await this.modelTrainingService.trainAsset(asset, trainingSamples);
 
     if (trainingResult.artifact !== null) {
@@ -584,7 +623,7 @@ export class ModelRuntimeService {
           this.updateStatus(asset, {
             state: "training",
           });
-          await this.trainAssetBlock(asset, blockSnapshots);
+          await this.trainAssetBlock(asset, blockSnapshots, blockStartAt, blockEndAt);
           this.updateStatus(asset, {
             lastCollectorFromAt: new Date(blockEndAt).toISOString(),
             state: "idle",

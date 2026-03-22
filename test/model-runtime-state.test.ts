@@ -21,7 +21,10 @@ test("ModelRuntimeStateService persists and restores per-asset cursors and predi
         lastProcessedBlockEndAt: "2025-01-01T00:05:00.000Z",
         lastProcessedBlockStartAt: "2025-01-01T00:00:00.000Z",
         recentPredictionRecords: [],
-        rollingPredictionOutcomes: [true, false],
+        rollingPredictionOutcomes: [
+          { isCorrect: true, resolvedAt: "2025-01-01T00:03:00.000Z" },
+          { isCorrect: false, resolvedAt: "2025-01-01T00:04:00.000Z" },
+        ],
       },
       eth: {
         lastCollectorFromAt: null,
@@ -52,7 +55,10 @@ test("ModelRuntimeStateService persists and restores per-asset cursors and predi
 
   assert.equal(runtimeStateSnapshot.schemaVersion, 2);
   assert.equal(runtimeStateSnapshot.assets.btc.lastCollectorFromAt, "2025-01-01T00:05:00.000Z");
-  assert.deepEqual(runtimeStateSnapshot.assets.btc.rollingPredictionOutcomes, [true, false]);
+  assert.deepEqual(runtimeStateSnapshot.assets.btc.rollingPredictionOutcomes, [
+    { isCorrect: true, resolvedAt: "2025-01-01T00:03:00.000Z" },
+    { isCorrect: false, resolvedAt: "2025-01-01T00:04:00.000Z" },
+  ]);
 });
 
 test("ModelRuntimeStateService restores an empty crypto state from legacy manifest", async () => {

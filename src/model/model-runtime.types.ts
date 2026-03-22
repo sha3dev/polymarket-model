@@ -1,7 +1,13 @@
-import type { ModelDirectionProbability, ModelPredictionRecord, ModelPredictionSource } from "./model.types.ts";
+import type {
+  ModelDirectionProbability,
+  ModelPredictedDirection,
+  ModelPredictionRecord,
+  ModelPredictionSource,
+  ModelRollingPredictionOutcome,
+} from "./model.types.ts";
 
 export type ModelHeadPrediction = {
-  predictedDirection: "down" | "up";
+  predictedDirection: ModelPredictedDirection;
   predictedProbability: ModelDirectionProbability;
   predictedReturn: number;
 };
@@ -38,5 +44,5 @@ export type ModelPredictionResolution = {
 
 export type ModelPredictionHistorySnapshot = {
   predictions: ModelPredictionRecord[];
-  rollingPredictionOutcomes: boolean[];
+  rollingPredictionOutcomes: ModelRollingPredictionOutcome[];
 };

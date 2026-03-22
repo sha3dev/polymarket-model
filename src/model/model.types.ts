@@ -27,6 +27,8 @@ export type ModelPredictionRequest = {
   asset: ModelAsset;
 };
 
+export type ModelPredictedDirection = "down" | "flat" | "up";
+
 export type ModelDirectionProbability = {
   down: number;
   up: number;
@@ -61,7 +63,7 @@ export type ModelPredictionRecord = {
   contextEndAt: string;
   targetStartAt: string;
   targetEndAt: string;
-  predictedDirection: "down" | "up";
+  predictedDirection: ModelPredictedDirection;
   predictedReturn: number;
   predictedProbabilityUp: number | null;
   predictedProbabilityDown: number | null;
@@ -250,12 +252,17 @@ export type ModelArtifact = {
   model: ModelHeadArtifact;
 };
 
+export type ModelRollingPredictionOutcome = {
+  isCorrect: boolean;
+  resolvedAt: string;
+};
+
 export type ModelRuntimeStateAssetSnapshot = {
   lastCollectorFromAt: string | null;
   lastProcessedBlockStartAt: string | null;
   lastProcessedBlockEndAt: string | null;
   recentPredictionRecords: ModelPredictionRecord[];
-  rollingPredictionOutcomes: boolean[];
+  rollingPredictionOutcomes: ModelRollingPredictionOutcome[];
 };
 
 export type ModelRuntimeStateSnapshot = {

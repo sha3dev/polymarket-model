@@ -7,7 +7,15 @@ import logger from "../logger.ts";
 import type { TensorflowApiDecodedPrediction, TensorflowApiHeadMetadata, TensorflowApiModelRecord } from "../tensorflow-api/tensorflow-api.types.ts";
 import { TensorflowApiClientService } from "../tensorflow-api/tensorflow-api-client.service.ts";
 import { TensorflowApiModelDefinitionService } from "../tensorflow-api/tensorflow-api-model-definition.service.ts";
-import type { ModelArtifact, ModelAsset, ModelCryptoInput, ModelCryptoSample, ModelFeatureNames, ModelTensorflowArchitecture } from "./model.types.ts";
+import type {
+  ModelArtifact,
+  ModelAsset,
+  ModelCryptoInput,
+  ModelCryptoSample,
+  ModelFeatureNames,
+  ModelPredictedDirection,
+  ModelTensorflowArchitecture,
+} from "./model.types.ts";
 import { ModelPreprocessingService } from "./model-preprocessing.service.ts";
 import type { ModelHeadPrediction, ModelTrainingSplit, ModelTrainResult } from "./model-runtime.types.ts";
 
@@ -23,6 +31,7 @@ const CRYPTO_ARCHITECTURES: Record<ModelAsset, ModelTensorflowArchitecture> = {
 };
 
 const VALIDATION_SAMPLE_RATIO = 0.2;
+const PREDICTION_TIE_EPSILON = 0.0005;
 
 /**
  * @section types
@@ -266,6 +275,21 @@ export class ModelTrainingService {
     return decodedPrediction;
   }
 
+  private buildPredictedDirection(predictedReturn: number, predictedProbabilityDown: number, predictedProbabilityUp: number): ModelPredictedDirection {
+    const probabilityGap = Math.abs(predictedProbabilityUp - predictedProbabilityDown);
+    let predictedDirection: ModelPredictedDirection = "flat";
+
+    if (probabilityGap > PREDICTION_TIE_EPSILON) {
+      predictedDirection = predictedProbabilityUp > predictedProbabilityDown ? "up" : "down";
+    }
+
+    if (!Number.isFinite(predictedProbabilityUp) || !Number.isFinite(predictedProbabilityDown)) {
+      predictedDirection = predictedReturn > 0 ? "up" : "down";
+    }
+
+    return predictedDirection;
+  }
+
   private async buildValidationPredictions(modelId: string, scaledValidationSequences: number[][][]): Promise<TensorflowApiDecodedPrediction[]> {
     const predictionResponse = await this.tensorflowApiClientService.predict(modelId, {
       predictionInput: {
@@ -303,7 +327,11 @@ export class ModelTrainingService {
     });
     const decodedPrediction = this.buildDecodedPrediction(predictionResponse);
     const modelHeadPrediction: ModelHeadPrediction = {
-      predictedDirection: decodedPrediction.predictedReturn > 0 ? "up" : "down",
+      predictedDirection: this.buildPredictedDirection(
+        decodedPrediction.predictedReturn,
+        decodedPrediction.probabilities.down,
+        decodedPrediction.probabilities.up,
+      ),
       predictedProbability: decodedPrediction.probabilities,
       predictedReturn: decodedPrediction.predictedReturn,
     };

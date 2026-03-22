@@ -12,7 +12,13 @@ import * as path from "node:path";
 
 import config from "../config.ts";
 import logger from "../logger.ts";
-import type { ModelAsset, ModelPredictionRecord, ModelRuntimeStateAssetSnapshot, ModelRuntimeStateSnapshot } from "./model.types.ts";
+import type {
+  ModelAsset,
+  ModelPredictionRecord,
+  ModelRollingPredictionOutcome,
+  ModelRuntimeStateAssetSnapshot,
+  ModelRuntimeStateSnapshot,
+} from "./model.types.ts";
 
 /**
  * @section consts
@@ -122,20 +128,38 @@ export class ModelRuntimeStateService {
     return predictionRecord;
   }
 
+  private buildRollingPredictionOutcome(rawRecord: unknown): ModelRollingPredictionOutcome | null {
+    const record = rawRecord as ModelRollingPredictionOutcome;
+    let rollingPredictionOutcome: ModelRollingPredictionOutcome | null = null;
+
+    if (typeof rawRecord === "boolean") {
+      rollingPredictionOutcome = {
+        isCorrect: rawRecord,
+        resolvedAt: new Date(0).toISOString(),
+      };
+    }
+
+    if (typeof record?.isCorrect === "boolean" && typeof record.resolvedAt === "string") {
+      rollingPredictionOutcome = record;
+    }
+
+    return rollingPredictionOutcome;
+  }
+
   private buildAssetState(rawRecord: unknown): ModelRuntimeStateAssetSnapshot {
     const record = rawRecord as Record<string, unknown>;
     const recentPredictionRecords = Array.isArray(record?.recentPredictionRecords)
       ? record.recentPredictionRecords.map((entry) => this.buildPredictionRecord(entry)).filter((entry) => entry !== null)
       : [];
     const rollingPredictionOutcomes = Array.isArray(record?.rollingPredictionOutcomes)
-      ? record.rollingPredictionOutcomes.filter((entry) => typeof entry === "boolean")
+      ? record.rollingPredictionOutcomes.map((entry) => this.buildRollingPredictionOutcome(entry)).filter((entry) => entry !== null)
       : [];
     const assetState: ModelRuntimeStateAssetSnapshot = {
       lastCollectorFromAt: typeof record?.lastCollectorFromAt === "string" ? record.lastCollectorFromAt : null,
       lastProcessedBlockEndAt: typeof record?.lastProcessedBlockEndAt === "string" ? record.lastProcessedBlockEndAt : null,
       lastProcessedBlockStartAt: typeof record?.lastProcessedBlockStartAt === "string" ? record.lastProcessedBlockStartAt : null,
       recentPredictionRecords,
-      rollingPredictionOutcomes: rollingPredictionOutcomes as boolean[],
+      rollingPredictionOutcomes: rollingPredictionOutcomes as ModelRollingPredictionOutcome[],
     };
     return assetState;
   }
