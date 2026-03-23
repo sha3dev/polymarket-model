@@ -41,6 +41,7 @@ export class DashboardService {
         --training: #b77819;
         --waiting: #6b7280;
         --error: #c0392b;
+        --weak: #b77819;
         --accent: #0f766e;
         --shadow: 0 20px 40px rgba(16,24,32,0.1);
       }
@@ -184,6 +185,7 @@ export class DashboardService {
       .badge-training { background: rgba(183,120,25,0.14); color: var(--training); }
       .badge-waiting { background: rgba(107,114,128,0.16); color: var(--waiting); }
       .badge-error { background: rgba(192,57,43,0.14); color: var(--error); }
+      .badge-weak { background: rgba(183,120,25,0.14); color: var(--weak); }
       .badge-manual { background: rgba(15,118,110,0.14); color: var(--accent); }
       .badge-automatic { background: rgba(18,33,44,0.1); color: var(--ink); }
       .badge-yes { background: rgba(29,122,79,0.12); color: var(--ready); }
@@ -266,7 +268,7 @@ export class DashboardService {
       <section class="panel section">
         <div class="section-head">
           <h2>Assets</h2>
-          <div class="section-note">Each row shows where the training loop is, whether live prediction is ready, and the rolling hit-rate over recent resolved predictions.</div>
+          <div class="section-note">Each row shows where the training loop is, whether live prediction is ready, and the rolling hit-rate over recent resolved strong predictions.</div>
         </div>
         <div class="table-shell">
           <table>
@@ -279,8 +281,8 @@ export class DashboardService {
                 <th><span class="hint" title="Timestamp of the latest live snapshot received from polymarket-snapshot.">Last Live Snapshot</span></th>
                 <th><span class="hint" title="How many successful remote training cycles this asset model has completed.">Training Count</span></th>
                 <th><span class="hint" title="Timestamp of the latest completed training cycle for this asset.">Last Training</span></th>
-                <th><span class="hint" title="Correct predictions divided by resolved predictions over the rolling recent window.">Rolling Hit Rate</span></th>
-                <th><span class="hint" title="How many resolved predictions currently contribute to the rolling hit-rate.">Rolling Count</span></th>
+                <th><span class="hint" title="Correct strong predictions divided by resolved strong predictions over the rolling recent window. Predictions below the confidence threshold are excluded.">Rolling Hit Rate</span></th>
+                <th><span class="hint" title="How many resolved strong predictions currently contribute to the rolling hit-rate.">Rolling Count</span></th>
                 <th><span class="hint" title="Most recent prediction for this asset. Green means the latest resolved prediction was correct, red means it was wrong, neutral means it is still pending.">Last Prediction</span></th>
                 <th><span class="hint" title="Latest processing error for this asset, if any.">Last Error</span></th>
                 <th><span class="hint" title="Launches a manual prediction using the most recent live buffer.">Predict</span></th>
@@ -294,7 +296,7 @@ export class DashboardService {
       <section class="panel section">
         <div class="section-head">
           <h2>Recent Predictions</h2>
-          <div class="section-note">Pending rows are waiting for 30 seconds of real outcome data before they can be scored. Flat predictions resolve, but they do not count toward hit-rate.</div>
+          <div class="section-note">Pending rows are waiting for 30 seconds of real outcome data before they can be scored. Flat or low-confidence predictions resolve, but they do not count toward hit-rate.</div>
         </div>
         <div class="table-shell">
           <table>
@@ -345,7 +347,7 @@ export class DashboardService {
             <h3>Prediction Values</h3>
             <dl>
               <dt>Pred badge</dt>
-              <dd>The label shows U, D, or F plus the model confidence at prediction time. Green means correct, red means wrong, and neutral means pending, flat, or unresolved.</dd>
+              <dd>The label shows U, D, or F plus the model confidence at prediction time. Green means a strong correct prediction, red means a strong wrong prediction, yellow means the confidence was below ${config.MODEL_HIT_RATE_MIN_CONFIDENCE.toFixed(1)}, and neutral means pending, flat, or unresolved.</dd>
               <dt>Rolling hit-rate</dt>
               <dd>The share of correct non-flat resolved predictions over the last 2 hours for that asset.</dd>
             </dl>
@@ -414,6 +416,19 @@ export class DashboardService {
         return '<span class="' + cssClass + '">' + escapeHtml(value) + "</span>";
       };
 
+      const buildPredictionConfidence = (prediction) => {
+        const upValue = prediction.upValueAtPrediction || 0;
+        const downValue = prediction.downValueAtPrediction || 0;
+        const predictionConfidence = Math.max(upValue, downValue);
+        return predictionConfidence;
+      };
+
+      const isWeakPrediction = (prediction) => {
+        const predictionConfidence = buildPredictionConfidence(prediction);
+        const isWeak = prediction.predictedDirection !== "flat" && predictionConfidence < ${config.MODEL_HIT_RATE_MIN_CONFIDENCE};
+        return isWeak;
+      };
+
       const buildSourceBadge = (value) => {
         const cssClass = value === "manual" ? "badge badge-manual" : "badge badge-automatic";
         const label = value === "manual" ? "M" : "A";
@@ -424,11 +439,20 @@ export class DashboardService {
         let badgeHtml = '<span class="muted">—</span>';
         if (prediction !== null) {
           let cssClass = "badge badge-waiting";
+          if (prediction.status === "error") {
+            cssClass = "badge badge-error";
+          }
+          if (prediction.status !== "error" && isWeakPrediction(prediction)) {
+            cssClass = "badge badge-weak";
+          }
           if (prediction.predictedDirection !== "flat" && prediction.isCorrect === true) {
             cssClass = "badge badge-yes";
           }
           if (prediction.predictedDirection !== "flat" && prediction.isCorrect === false) {
             cssClass = "badge badge-no";
+          }
+          if (prediction.status !== "error" && isWeakPrediction(prediction)) {
+            cssClass = "badge badge-weak";
           }
           badgeHtml = '<span class="' + cssClass + '">' + escapeHtml(prediction.predictedDirection) + "</span>";
         }
@@ -449,7 +473,9 @@ export class DashboardService {
       const buildPredictionBadge = (prediction) => {
         const compactPredictionValue = buildCompactPredictionValue(prediction);
         const actualDirectionLabel = prediction.actualDirection === null ? "pending" : prediction.actualDirection;
-        const correctnessLabel = prediction.predictedDirection === "flat" && prediction.status === "resolved"
+        const correctnessLabel = prediction.status !== "error" && isWeakPrediction(prediction)
+          ? "weak"
+          : prediction.predictedDirection === "flat" && prediction.status === "resolved"
           ? "flat"
           : prediction.isCorrect === true
             ? "correct"
@@ -461,11 +487,17 @@ export class DashboardService {
         if (prediction.status === "error") {
           cssClass = "badge badge-error";
         }
+        if (prediction.status !== "error" && isWeakPrediction(prediction)) {
+          cssClass = "badge badge-weak";
+        }
         if (prediction.isCorrect === true) {
           cssClass = "badge badge-yes";
         }
         if (prediction.isCorrect === false && prediction.predictedDirection !== "flat") {
           cssClass = "badge badge-no";
+        }
+        if (prediction.status !== "error" && isWeakPrediction(prediction)) {
+          cssClass = "badge badge-weak";
         }
         const titleValue = "predicted=" + prediction.predictedDirection + ", actual=" + actualDirectionLabel + ", result=" + correctnessLabel;
         const badgeHtml = '<span class="' + cssClass + '" title="' + escapeHtml(titleValue) + '">' + escapeHtml(compactPredictionValue) + "</span>";
@@ -478,7 +510,9 @@ export class DashboardService {
         const waitingCount = assets.filter((asset) => asset.state === "waiting").length;
         const liveReadyCount = assets.filter((asset) => asset.isLiveReady).length;
         const resolvedPredictions = state.predictions.filter((prediction) => prediction.status === "resolved");
-        const averageHitRate = assets.length === 0 ? null : assets.reduce((sum, asset) => sum + (asset.rollingHitRate || 0), 0) / assets.length;
+        const totalRollingCorrectCount = assets.reduce((sum, asset) => sum + asset.rollingCorrectCount, 0);
+        const totalRollingPredictionCount = assets.reduce((sum, asset) => sum + asset.rollingPredictionCount, 0);
+        const averageHitRate = totalRollingPredictionCount === 0 ? null : totalRollingCorrectCount / totalRollingPredictionCount;
         const metrics = [
           { label: "Assets", value: String(assets.length) },
           { label: "Training Now", value: String(trainingCount) },

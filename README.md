@@ -840,6 +840,8 @@ Every top-level config key exported by `src/config.ts`:
   - compatibility alias aligned with the context interval
 - `MODEL_ROLLING_HIT_RATE_WINDOW_MS`
   - time span of the rolling resolved-prediction window, default 2 hours
+- `MODEL_HIT_RATE_MIN_CONFIDENCE`
+  - minimum directional confidence required before a resolved non-flat prediction counts toward rolling hit-rate, default `0.7`
 - `MODEL_CHAINLINK_STALE_MS`
   - maximum age for Chainlink values to be treated as fresh
 - `MODEL_MIN_SAMPLE_COUNT`

@@ -49,6 +49,7 @@ const PREDICTION_TIE_EPSILON = 0.0005;
 type ModelRuntimeServiceOptions = {
   collectorClientService: CollectorClientService;
   modelFeatureService: ModelFeatureService;
+  minConfidenceForHitRate: number;
   modelRuntimeStateService: ModelRuntimeStateService;
   modelTrainingService: ModelTrainingService;
   processIntervalMs: number;
@@ -72,6 +73,8 @@ export class ModelRuntimeService {
   private readonly collectorClientService: CollectorClientService;
 
   private readonly modelFeatureService: ModelFeatureService;
+
+  private readonly minConfidenceForHitRate: number;
 
   private readonly modelRuntimeStateService: ModelRuntimeStateService;
 
@@ -118,6 +121,7 @@ export class ModelRuntimeService {
   public constructor(options: ModelRuntimeServiceOptions) {
     this.collectorClientService = options.collectorClientService;
     this.modelFeatureService = options.modelFeatureService;
+    this.minConfidenceForHitRate = options.minConfidenceForHitRate;
     this.modelRuntimeStateService = options.modelRuntimeStateService;
     this.modelTrainingService = options.modelTrainingService;
     this.processIntervalMs = options.processIntervalMs;
@@ -149,6 +153,7 @@ export class ModelRuntimeService {
     const modelRuntimeService = new ModelRuntimeService({
       collectorClientService: CollectorClientService.createDefault(),
       modelFeatureService,
+      minConfidenceForHitRate: config.MODEL_HIT_RATE_MIN_CONFIDENCE,
       modelRuntimeStateService: ModelRuntimeStateService.createDefault(),
       modelTrainingService: ModelTrainingService.createDefault(modelFeatureService.buildFeatureNames()),
       processIntervalMs: config.MODEL_PROCESS_INTERVAL_MS,
@@ -351,6 +356,20 @@ export class ModelRuntimeService {
     return predictedProbabilityUp;
   }
 
+  private buildPredictionConfidence(predictionRecord: ModelPredictionRecord): number {
+    const predictedProbabilityUp = predictionRecord.predictedProbabilityUp || 0;
+    const predictedProbabilityDown = predictionRecord.predictedProbabilityDown || 0;
+    const predictionConfidence = Math.max(predictedProbabilityUp, predictedProbabilityDown);
+    return predictionConfidence;
+  }
+
+  private shouldCountPredictionForHitRate(predictionRecord: ModelPredictionRecord): boolean {
+    const predictionConfidence = this.buildPredictionConfidence(predictionRecord);
+    const shouldCountPrediction =
+      predictionRecord.predictedDirection !== "flat" && predictionRecord.isCorrect !== null && predictionConfidence >= this.minConfidenceForHitRate;
+    return shouldCountPrediction;
+  }
+
   private listAssetPredictions(asset: ModelAsset): ModelPredictionRecord[] {
     const predictionIds = this.assetPredictionRegistry.get(asset) || [];
     const predictionRecords = predictionIds
@@ -396,17 +415,17 @@ export class ModelRuntimeService {
     this.refreshPredictionStatusFields(predictionRecord.asset);
   }
 
-  private appendResolvedOutcome(asset: ModelAsset, isCorrect: boolean): void {
+  private appendResolvedOutcome(predictionRecord: ModelPredictionRecord): void {
     const rollingPredictionOutcomes = [
-      ...(this.rollingOutcomeRegistry.get(asset) || []),
+      ...(this.rollingOutcomeRegistry.get(predictionRecord.asset) || []),
       {
-        isCorrect,
+        isCorrect: predictionRecord.isCorrect || false,
         resolvedAt: new Date().toISOString(),
       },
     ];
-    this.rollingOutcomeRegistry.set(asset, rollingPredictionOutcomes);
-    this.pruneRollingOutcomes(asset, Date.now());
-    this.refreshPredictionStatusFields(asset);
+    this.rollingOutcomeRegistry.set(predictionRecord.asset, rollingPredictionOutcomes);
+    this.pruneRollingOutcomes(predictionRecord.asset, Date.now());
+    this.refreshPredictionStatusFields(predictionRecord.asset);
   }
 
   private buildPredictionRecord(
@@ -558,8 +577,8 @@ export class ModelRuntimeService {
           const resolvedPredictionRecord = this.resolvePredictionRecord(predictionRecord, referenceValueAtTargetEnd);
           this.registerPrediction(resolvedPredictionRecord);
 
-          if (resolvedPredictionRecord.isCorrect !== null) {
-            this.appendResolvedOutcome(asset, resolvedPredictionRecord.isCorrect);
+          if (this.shouldCountPredictionForHitRate(resolvedPredictionRecord)) {
+            this.appendResolvedOutcome(resolvedPredictionRecord);
           }
         } else {
           this.registerPrediction(this.buildErrorPredictionRecord(predictionRecord, "unable to resolve automatic prediction outcome"));
@@ -688,8 +707,8 @@ export class ModelRuntimeService {
           const resolvedPredictionRecord = this.resolvePredictionRecord(predictionRecord, referenceValueAtTargetEnd);
           this.updatePrediction(resolvedPredictionRecord);
 
-          if (resolvedPredictionRecord.isCorrect !== null) {
-            this.appendResolvedOutcome(predictionRecord.asset, resolvedPredictionRecord.isCorrect);
+          if (this.shouldCountPredictionForHitRate(resolvedPredictionRecord)) {
+            this.appendResolvedOutcome(resolvedPredictionRecord);
           }
         }
 

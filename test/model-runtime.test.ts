@@ -58,6 +58,7 @@ test("ModelRuntimeService restores remote crypto artifacts and serves live manua
         return 100_100;
       },
     } as never,
+    minConfidenceForHitRate: 0.7,
     modelRuntimeStateService: {
       async loadState(): Promise<{
         assets: {
@@ -306,6 +307,7 @@ test("ModelRuntimeService scores automatic historical predictions on the first 3
         return referenceValue;
       },
     } as never,
+    minConfidenceForHitRate: 0.7,
     modelRuntimeStateService: {
       async loadState() {
         return {
@@ -487,6 +489,7 @@ test("ModelRuntimeService excludes resolved flat predictions from rolling hit-ra
         return referenceValue;
       },
     } as never,
+    minConfidenceForHitRate: 0.7,
     modelRuntimeStateService: {
       async loadState() {
         return {
@@ -607,6 +610,183 @@ test("ModelRuntimeService excludes resolved flat predictions from rolling hit-ra
   assert.equal(latestPrediction?.isCorrect, null);
 });
 
+test("ModelRuntimeService excludes weak resolved predictions from rolling hit-rate metrics", async () => {
+  const decisionTime = Date.now();
+  const targetEndAt = decisionTime + 20;
+  const modelRuntimeService = new ModelRuntimeService({
+    collectorClientService: {
+      async readSnapshotPage(): Promise<[]> {
+        return [];
+      },
+      async readSnapshots(): Promise<[]> {
+        return [];
+      },
+    } as never,
+    modelFeatureService: {
+      buildFeatureNames() {
+        return { cryptoFeatures: ["crypto-1"] };
+      },
+      buildLivePredictionSnapshots(snapshots: unknown[]) {
+        return snapshots as never;
+      },
+      buildPredictionInput(): {
+        asset: "btc";
+        cryptoSequence: number[][];
+        currentChainlinkPrice: number;
+        currentExchangePrice: number;
+        decisionTime: number;
+        isChainlinkFresh: true;
+        latestSnapshotAt: number;
+        realizedVolatility30s: number;
+      } {
+        return {
+          asset: "btc",
+          cryptoSequence: Array.from({ length: 2 }, () => [0]),
+          currentChainlinkPrice: 100_000,
+          currentExchangePrice: 100_000,
+          decisionTime,
+          isChainlinkFresh: true,
+          latestSnapshotAt: decisionTime,
+          realizedVolatility30s: 0.01,
+        };
+      },
+      buildTrainingSamples(): [] {
+        return [];
+      },
+      getBlockDurationMs(): number {
+        return 300_000;
+      },
+      getPredictionTargetMs(): number {
+        return 20;
+      },
+      readReferenceValue(_asset: "btc", snapshots: Array<{ generated_at: number }>, targetTime: number): number | null {
+        const hasReachedTarget = snapshots.some((snapshot) => snapshot.generated_at >= targetTime);
+        const referenceValue = hasReachedTarget ? 100_050 : null;
+        return referenceValue;
+      },
+    } as never,
+    minConfidenceForHitRate: 0.7,
+    modelRuntimeStateService: {
+      async loadState() {
+        return {
+          assets: {
+            btc: {
+              lastCollectorFromAt: null,
+              lastProcessedBlockEndAt: null,
+              lastProcessedBlockStartAt: null,
+              recentPredictionRecords: [],
+              rollingPredictionOutcomes: [],
+            },
+          },
+          lastHistoricalBlockCompletedAt: null,
+          schemaVersion: 2,
+        };
+      },
+      async persistState(): Promise<void> {},
+    } as never,
+    modelTrainingService: {
+      async ensureTensorflowApi(): Promise<void> {},
+      async predictAsset(): Promise<{ predictedDirection: "up"; predictedProbability: { down: number; up: number }; predictedReturn: number }> {
+        return {
+          predictedDirection: "up",
+          predictedProbability: { down: 0.31, up: 0.69 },
+          predictedReturn: 0.001,
+        };
+      },
+      async readRemoteModels(): Promise<
+        Array<{
+          createdAt: string;
+          lastPredictionAt: null;
+          lastPredictionJobId: null;
+          lastTrainingAt: string;
+          lastTrainingJobId: string;
+          metadata: Record<string, unknown>;
+          modelId: string;
+          predictionCount: number;
+          status: "ready";
+          trainingCount: number;
+          updatedAt: string;
+        }>
+      > {
+        return [
+          {
+            createdAt: "2025-01-01T00:00:00.000Z",
+            lastPredictionAt: null,
+            lastPredictionJobId: null,
+            lastTrainingAt: "2025-01-01T00:10:00.000Z",
+            lastTrainingJobId: "job-1",
+            metadata: {
+              architecture: { blockCount: 6, channelCount: 32, dilations: [1, 2], dropout: 0.1, family: "tcn", featureCount: 1, sequenceLength: 2 },
+              classWeights: [1, 1],
+              featureMedians: [0],
+              featureNames: ["crypto-1"],
+              featureScales: [1],
+              lastValidationWindowEnd: "2025-01-01T00:00:00.000Z",
+              lastValidationWindowStart: "2024-12-31T12:00:00.000Z",
+              logicalKey: "btc",
+              logicalModelType: "crypto",
+              metrics: {
+                directionAccuracy: 0.66,
+                directionSupport: { down: 1, up: 2 },
+                regressionHuber: 0.01,
+                regressionMae: 0.01,
+                regressionRmse: 0.02,
+                sampleCount: 3,
+              },
+              trainedAt: "2025-01-01T00:10:00.000Z",
+              trainingSampleCount: 10,
+              validationSampleCount: 3,
+            },
+            modelId: "polymarket_model_crypto_btc",
+            predictionCount: 0,
+            status: "ready",
+            trainingCount: 3,
+            updatedAt: "2025-01-01T00:10:00.000Z",
+          },
+        ];
+      },
+      async trainAsset(): Promise<{ artifact: null; trainingSampleCount: number; validationSampleCount: number }> {
+        return { artifact: null, trainingSampleCount: 0, validationSampleCount: 0 };
+      },
+    } as never,
+    processIntervalMs: 60_000,
+    rollingHitRateWindowMs: 7_200_000,
+    shouldEnableAutomaticPredictions: true,
+    shouldLogTrainingProgress: false,
+    shouldRestoreOnStart: true,
+    snapshotStoreService: {
+      getLatestSnapshotAt(): string {
+        return new Date(targetEndAt).toISOString();
+      },
+      getLiveSnapshots(): Array<{ generated_at: number }> {
+        return [{ generated_at: decisionTime }, { generated_at: targetEndAt }];
+      },
+      async start(): Promise<void> {},
+      async stop(): Promise<void> {},
+    } as never,
+    supportedAssets: ["btc"],
+  });
+
+  await modelRuntimeService.start();
+  await modelRuntimeService.predict({ asset: "btc" });
+  await new Promise((resolve) => {
+    setTimeout(resolve, 50);
+  });
+
+  const assetStatus = modelRuntimeService.getAssetStatus("btc");
+  const latestPrediction = modelRuntimeService.getPredictionRecords().predictions.at(-1) || null;
+
+  await modelRuntimeService.stop();
+
+  assert.equal(assetStatus.rollingPredictionCount, 0);
+  assert.equal(assetStatus.rollingCorrectCount, 0);
+  assert.equal(assetStatus.rollingHitRate, null);
+  assert.equal(latestPrediction?.status, "resolved");
+  assert.equal(latestPrediction?.predictedDirection, "up");
+  assert.equal(latestPrediction?.predictedProbabilityUp, 0.69);
+  assert.equal(latestPrediction?.isCorrect, true);
+});
+
 test("ModelRuntimeService can disable automatic historical predictions while keeping training active", async () => {
   const blockStartAt = Date.parse("2025-01-01T00:00:00.000Z");
   const blockEndAt = blockStartAt + 300_000;
@@ -668,6 +848,7 @@ test("ModelRuntimeService can disable automatic historical predictions while kee
         return 100_100;
       },
     } as never,
+    minConfidenceForHitRate: 0.7,
     modelRuntimeStateService: {
       async loadState() {
         return {
