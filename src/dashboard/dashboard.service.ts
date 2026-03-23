@@ -41,7 +41,7 @@ export class DashboardService {
         --training: #b77819;
         --waiting: #6b7280;
         --error: #c0392b;
-        --weak: #b77819;
+        --weak: #d97706;
         --accent: #0f766e;
         --shadow: 0 20px 40px rgba(16,24,32,0.1);
       }
@@ -185,7 +185,7 @@ export class DashboardService {
       .badge-training { background: rgba(183,120,25,0.14); color: var(--training); }
       .badge-waiting { background: rgba(107,114,128,0.16); color: var(--waiting); }
       .badge-error { background: rgba(192,57,43,0.14); color: var(--error); }
-      .badge-weak { background: rgba(183,120,25,0.14); color: var(--weak); }
+      .badge-weak { background: rgba(217,119,6,0.16); color: var(--weak); }
       .badge-manual { background: rgba(15,118,110,0.14); color: var(--accent); }
       .badge-automatic { background: rgba(18,33,44,0.1); color: var(--ink); }
       .badge-yes { background: rgba(29,122,79,0.12); color: var(--ready); }
@@ -417,9 +417,9 @@ export class DashboardService {
       };
 
       const buildPredictionConfidence = (prediction) => {
-        const upValue = prediction.upValueAtPrediction || 0;
-        const downValue = prediction.downValueAtPrediction || 0;
-        const predictionConfidence = Math.max(upValue, downValue);
+        const predictedProbabilityUp = prediction.predictedProbabilityUp || 0;
+        const predictedProbabilityDown = prediction.predictedProbabilityDown || 0;
+        const predictionConfidence = Math.max(predictedProbabilityUp, predictedProbabilityDown);
         return predictionConfidence;
       };
 
@@ -427,6 +427,22 @@ export class DashboardService {
         const predictionConfidence = buildPredictionConfidence(prediction);
         const isWeak = prediction.predictedDirection !== "flat" && predictionConfidence < ${config.MODEL_HIT_RATE_MIN_CONFIDENCE};
         return isWeak;
+      };
+
+      const buildPredictionBadgeClass = (prediction) => {
+        let cssClass = "badge badge-waiting";
+
+        if (prediction.status === "error") {
+          cssClass = "badge badge-error";
+        } else if (isWeakPrediction(prediction)) {
+          cssClass = "badge badge-weak";
+        } else if (prediction.isCorrect === true) {
+          cssClass = "badge badge-yes";
+        } else if (prediction.isCorrect === false && prediction.predictedDirection !== "flat") {
+          cssClass = "badge badge-no";
+        }
+
+        return cssClass;
       };
 
       const buildSourceBadge = (value) => {
@@ -438,22 +454,7 @@ export class DashboardService {
       const buildLatestPredictionBadge = (prediction) => {
         let badgeHtml = '<span class="muted">—</span>';
         if (prediction !== null) {
-          let cssClass = "badge badge-waiting";
-          if (prediction.status === "error") {
-            cssClass = "badge badge-error";
-          }
-          if (prediction.status !== "error" && isWeakPrediction(prediction)) {
-            cssClass = "badge badge-weak";
-          }
-          if (prediction.predictedDirection !== "flat" && prediction.isCorrect === true) {
-            cssClass = "badge badge-yes";
-          }
-          if (prediction.predictedDirection !== "flat" && prediction.isCorrect === false) {
-            cssClass = "badge badge-no";
-          }
-          if (prediction.status !== "error" && isWeakPrediction(prediction)) {
-            cssClass = "badge badge-weak";
-          }
+          const cssClass = buildPredictionBadgeClass(prediction);
           badgeHtml = '<span class="' + cssClass + '">' + escapeHtml(prediction.predictedDirection) + "</span>";
         }
         return badgeHtml;
@@ -473,7 +474,8 @@ export class DashboardService {
       const buildPredictionBadge = (prediction) => {
         const compactPredictionValue = buildCompactPredictionValue(prediction);
         const actualDirectionLabel = prediction.actualDirection === null ? "pending" : prediction.actualDirection;
-        const correctnessLabel = prediction.status !== "error" && isWeakPrediction(prediction)
+        const hasWeakConfidence = prediction.status !== "error" && isWeakPrediction(prediction);
+        const correctnessLabel = hasWeakConfidence
           ? "weak"
           : prediction.predictedDirection === "flat" && prediction.status === "resolved"
           ? "flat"
@@ -482,23 +484,7 @@ export class DashboardService {
             : prediction.isCorrect === false && prediction.predictedDirection !== "flat"
               ? "wrong"
               : prediction.status;
-        let cssClass = "badge badge-waiting";
-
-        if (prediction.status === "error") {
-          cssClass = "badge badge-error";
-        }
-        if (prediction.status !== "error" && isWeakPrediction(prediction)) {
-          cssClass = "badge badge-weak";
-        }
-        if (prediction.isCorrect === true) {
-          cssClass = "badge badge-yes";
-        }
-        if (prediction.isCorrect === false && prediction.predictedDirection !== "flat") {
-          cssClass = "badge badge-no";
-        }
-        if (prediction.status !== "error" && isWeakPrediction(prediction)) {
-          cssClass = "badge badge-weak";
-        }
+        const cssClass = buildPredictionBadgeClass(prediction);
         const titleValue = "predicted=" + prediction.predictedDirection + ", actual=" + actualDirectionLabel + ", result=" + correctnessLabel;
         const badgeHtml = '<span class="' + cssClass + '" title="' + escapeHtml(titleValue) + '">' + escapeHtml(compactPredictionValue) + "</span>";
         return badgeHtml;
