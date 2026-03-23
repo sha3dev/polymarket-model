@@ -52,6 +52,7 @@ type ModelRuntimeServiceOptions = {
   modelTrainingService: ModelTrainingService;
   processIntervalMs: number;
   rollingHitRateWindowMs: number;
+  shouldEnableAutomaticPredictions: boolean;
   shouldLogTrainingProgress: boolean;
   shouldRestoreOnStart: boolean;
   snapshotStoreService: SnapshotStoreService;
@@ -78,6 +79,8 @@ export class ModelRuntimeService {
   private readonly processIntervalMs: number;
 
   private readonly rollingHitRateWindowMs: number;
+
+  private readonly shouldEnableAutomaticPredictions: boolean;
 
   private readonly shouldLogTrainingProgress: boolean;
 
@@ -118,6 +121,7 @@ export class ModelRuntimeService {
     this.modelTrainingService = options.modelTrainingService;
     this.processIntervalMs = options.processIntervalMs;
     this.rollingHitRateWindowMs = options.rollingHitRateWindowMs;
+    this.shouldEnableAutomaticPredictions = options.shouldEnableAutomaticPredictions;
     this.shouldLogTrainingProgress = options.shouldLogTrainingProgress;
     this.shouldRestoreOnStart = options.shouldRestoreOnStart;
     this.snapshotStoreService = options.snapshotStoreService;
@@ -148,6 +152,7 @@ export class ModelRuntimeService {
       modelTrainingService: ModelTrainingService.createDefault(modelFeatureService.buildFeatureNames()),
       processIntervalMs: config.MODEL_PROCESS_INTERVAL_MS,
       rollingHitRateWindowMs: config.MODEL_ROLLING_HIT_RATE_WINDOW_MS,
+      shouldEnableAutomaticPredictions: config.MODEL_AUTOMATIC_PREDICTIONS_ENABLED,
       shouldLogTrainingProgress: config.MODEL_LOG_TRAINING_PROGRESS,
       shouldRestoreOnStart: config.MODEL_RESTORE_ON_START,
       snapshotStoreService: SnapshotStoreService.createDefault(),
@@ -619,7 +624,9 @@ export class ModelRuntimeService {
             throw new Error("collector returned no snapshots for closed block");
           }
 
-          await this.runAutomaticPrediction(asset, blockSnapshots, blockStartAt);
+          if (this.shouldEnableAutomaticPredictions) {
+            await this.runAutomaticPrediction(asset, blockSnapshots, blockStartAt);
+          }
           this.updateStatus(asset, {
             state: "training",
           });

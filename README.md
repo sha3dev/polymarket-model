@@ -844,6 +844,8 @@ Every top-level config key exported by `src/config.ts`:
   - maximum age for Chainlink values to be treated as fresh
 - `MODEL_MIN_SAMPLE_COUNT`
   - minimum number of training samples required to train a block
+- `MODEL_AUTOMATIC_PREDICTIONS_ENABLED`
+  - whether the historical loop should issue automatic pre-training predictions for closed blocks
 - `MODEL_RESTORE_ON_START`
   - whether runtime state and remote model metadata should be restored on boot
 - `MODEL_LOG_TRAINING_PROGRESS`

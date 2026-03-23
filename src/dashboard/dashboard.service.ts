@@ -308,7 +308,6 @@ export class DashboardService {
                 <th><span class="hint" title="Direction that actually happened after the 30-second target window.">Real</span></th>
                 <th><span class="hint" title="Whether the predicted direction matched the final direction.">Correct</span></th>
                 <th><span class="hint" title="The model confidence at prediction time. U means up probability, D means down probability, and F means the model was effectively tied so the prediction is flat.">Pred</span></th>
-                <th><span class="hint" title="Final realized direction after the 30-second target window closed.">Result</span></th>
                 <th><span class="hint" title="The 30-second window whose final direction decides whether the prediction was correct.">Target Window</span></th>
               </tr>
             </thead>
@@ -564,7 +563,6 @@ export class DashboardService {
             "<td>" + buildOutcomeBadge(prediction.actualDirection) + "</td>" +
             "<td>" + buildCorrectBadge(prediction) + "</td>" +
             "<td>" + escapeHtml(buildCompactPredictionValue(prediction)) + "</td>" +
-            "<td>" + buildOutcomeBadge(prediction.actualDirection) + "</td>" +
             "<td class='wrap'>" + escapeHtml(formatTime(prediction.targetStartAt) + "→" + formatTime(prediction.targetEndAt)) + "</td>" +
           "</tr>"
         )).join("");
