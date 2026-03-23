@@ -119,7 +119,8 @@ test("HttpServerService serves crypto asset, prediction, and dashboard endpoints
   const dashboardHtml = await dashboardResponse.text();
   assert.equal(dashboardHtml.includes("Recent Predictions"), true);
   assert.equal(dashboardHtml.includes("Predict"), true);
-  assert.equal(dashboardHtml.includes('prediction.predictedDirection === "flat" && prediction.status === "resolved"'), true);
+  assert.equal(dashboardHtml.includes("Compact prediction summary."), true);
+  assert.equal(dashboardHtml.includes('title="' + "' + escapeHtml(titleValue) + '"), true);
   assert.equal(dashboardHtml.includes('prediction.isCorrect === false && prediction.predictedDirection !== "flat"'), true);
   assert.equal(assetsResponse.status, 200);
   assert.deepEqual(await assetsResponse.json(), STATUS_PAYLOAD);

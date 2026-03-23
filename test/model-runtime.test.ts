@@ -565,8 +565,14 @@ test("ModelRuntimeService can disable automatic historical predictions while kee
   ];
   let hasBuiltTrainingSamples = false;
   let automaticPredictionCallCount = 0;
+  let observedStateDuringTraining: ModelStatus["state"] | null = null;
   let trainingCallCount = 0;
-  const modelRuntimeService = new ModelRuntimeService({
+  let releaseTraining: (() => void) | undefined;
+  const trainingGatePromise = new Promise<void>((resolve) => {
+    releaseTraining = resolve;
+  });
+  let modelRuntimeService: ModelRuntimeService | null = null;
+  modelRuntimeService = new ModelRuntimeService({
     collectorClientService: {
       async readSnapshotPage(): Promise<Array<{ generated_at: number }>> {
         return [{ generated_at: blockStartAt }];
@@ -690,6 +696,8 @@ test("ModelRuntimeService can disable automatic historical predictions while kee
       },
       async trainAsset(): Promise<{ artifact: null; trainingSampleCount: number; validationSampleCount: number }> {
         trainingCallCount += 1;
+        observedStateDuringTraining = modelRuntimeService?.getAssetStatus("btc").state || null;
+        await trainingGatePromise;
         return { artifact: null, trainingSampleCount: 0, validationSampleCount: 0 };
       },
     } as never,
@@ -714,12 +722,16 @@ test("ModelRuntimeService can disable automatic historical predictions while kee
   await modelRuntimeService.start();
 
   for (let attemptIndex = 0; attemptIndex < 40; attemptIndex += 1) {
-    if (trainingCallCount > 0) {
+    if (observedStateDuringTraining !== null) {
       break;
     }
     await new Promise((resolve) => {
       setTimeout(resolve, 10);
     });
+  }
+
+  if (releaseTraining !== undefined) {
+    releaseTraining();
   }
 
   const predictionRecords = modelRuntimeService.getPredictionRecords().predictions;
@@ -729,5 +741,6 @@ test("ModelRuntimeService can disable automatic historical predictions while kee
   assert.equal(hasBuiltTrainingSamples, true);
   assert.equal(automaticPredictionCallCount, 0);
   assert.equal(trainingCallCount, 1);
+  assert.equal(observedStateDuringTraining, "training");
   assert.equal(predictionRecords.length, 0);
 });

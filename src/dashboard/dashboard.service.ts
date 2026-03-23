@@ -304,10 +304,7 @@ export class DashboardService {
                 <th><span class="hint" title="Crypto asset that was predicted.">Asset</span></th>
                 <th><span class="hint" title="A means automatic historical prediction. M means manual live prediction from the dashboard.">Src</span></th>
                 <th><span class="hint" title="Pending waits for the 30-second target to end. Resolved has a final result. Error failed before resolution.">Status</span></th>
-                <th><span class="hint" title="Direction forecast produced by the model at prediction time.">Predicted</span></th>
-                <th><span class="hint" title="Direction that actually happened after the 30-second target window.">Real</span></th>
-                <th><span class="hint" title="Whether the predicted direction matched the final direction.">Correct</span></th>
-                <th><span class="hint" title="The model confidence at prediction time. U means up probability, D means down probability, and F means the model was effectively tied so the prediction is flat.">Pred</span></th>
+                <th><span class="hint" title="Compact prediction summary. The badge shows the predicted side and confidence, while color shows whether the resolved prediction was correct.">Pred</span></th>
                 <th><span class="hint" title="The 30-second window whose final direction decides whether the prediction was correct.">Target Window</span></th>
               </tr>
             </thead>
@@ -347,10 +344,8 @@ export class DashboardService {
           <article class="help-card">
             <h3>Prediction Values</h3>
             <dl>
-              <dt>Pred Up / Pred Down</dt>
-              <dd>The model-side probabilities when the prediction was issued.</dd>
-              <dt>Final Up / Final Down</dt>
-              <dd>The realized binary outcome after 30 seconds. One side becomes 1 and the other becomes 0.</dd>
+              <dt>Pred badge</dt>
+              <dd>The label shows U, D, or F plus the model confidence at prediction time. Green means correct, red means wrong, and neutral means pending, flat, or unresolved.</dd>
               <dt>Rolling hit-rate</dt>
               <dd>The share of correct non-flat resolved predictions over the last 2 hours for that asset.</dd>
             </dl>
@@ -425,35 +420,6 @@ export class DashboardService {
         return '<span class="' + cssClass + '">' + escapeHtml(label) + "</span>";
       };
 
-      const buildOutcomeBadge = (value) => {
-        let badgeHtml = '<span class="muted">—</span>';
-        if (value === "up") {
-          badgeHtml = '<span class="badge badge-yes">up</span>';
-        }
-        if (value === "down") {
-          badgeHtml = '<span class="badge badge-no">down</span>';
-        }
-        if (value === "flat") {
-          badgeHtml = '<span class="badge badge-waiting">flat</span>';
-        }
-        return badgeHtml;
-      };
-
-      const buildCorrectBadge = (prediction) => {
-        let badgeHtml = '<span class="muted">Pending</span>';
-
-        if (prediction.predictedDirection === "flat" && prediction.status === "resolved") {
-          badgeHtml = '<span class="badge badge-waiting">flat</span>';
-        }
-        if (prediction.isCorrect === true) {
-          badgeHtml = '<span class="badge badge-yes">yes</span>';
-        }
-        if (prediction.isCorrect === false && prediction.predictedDirection !== "flat") {
-          badgeHtml = '<span class="badge badge-no">no</span>';
-        }
-        return badgeHtml;
-      };
-
       const buildLatestPredictionBadge = (prediction) => {
         let badgeHtml = '<span class="muted">—</span>';
         if (prediction !== null) {
@@ -478,6 +444,32 @@ export class DashboardService {
         const numericValue = isFlat ? upValue : isUpDominant ? upValue : downValue;
         const compactPredictionValue = directionLabel + " " + formatNumber(numericValue);
         return compactPredictionValue;
+      };
+
+      const buildPredictionBadge = (prediction) => {
+        const compactPredictionValue = buildCompactPredictionValue(prediction);
+        const actualDirectionLabel = prediction.actualDirection === null ? "pending" : prediction.actualDirection;
+        const correctnessLabel = prediction.predictedDirection === "flat" && prediction.status === "resolved"
+          ? "flat"
+          : prediction.isCorrect === true
+            ? "correct"
+            : prediction.isCorrect === false && prediction.predictedDirection !== "flat"
+              ? "wrong"
+              : prediction.status;
+        let cssClass = "badge badge-waiting";
+
+        if (prediction.status === "error") {
+          cssClass = "badge badge-error";
+        }
+        if (prediction.isCorrect === true) {
+          cssClass = "badge badge-yes";
+        }
+        if (prediction.isCorrect === false && prediction.predictedDirection !== "flat") {
+          cssClass = "badge badge-no";
+        }
+        const titleValue = "predicted=" + prediction.predictedDirection + ", actual=" + actualDirectionLabel + ", result=" + correctnessLabel;
+        const badgeHtml = '<span class="' + cssClass + '" title="' + escapeHtml(titleValue) + '">' + escapeHtml(compactPredictionValue) + "</span>";
+        return badgeHtml;
       };
 
       const buildSummaryMetrics = () => {
@@ -559,10 +551,7 @@ export class DashboardService {
             "<td>" + escapeHtml(prediction.asset.toUpperCase()) + "</td>" +
             "<td>" + buildSourceBadge(prediction.source) + "</td>" +
             "<td>" + buildStateBadge(prediction.status === "pending" ? "waiting" : prediction.status === "resolved" ? "ready" : "error") + "</td>" +
-            "<td>" + buildOutcomeBadge(prediction.predictedDirection) + "</td>" +
-            "<td>" + buildOutcomeBadge(prediction.actualDirection) + "</td>" +
-            "<td>" + buildCorrectBadge(prediction) + "</td>" +
-            "<td>" + escapeHtml(buildCompactPredictionValue(prediction)) + "</td>" +
+            "<td>" + buildPredictionBadge(prediction) + "</td>" +
             "<td class='wrap'>" + escapeHtml(formatTime(prediction.targetStartAt) + "→" + formatTime(prediction.targetEndAt)) + "</td>" +
           "</tr>"
         )).join("");

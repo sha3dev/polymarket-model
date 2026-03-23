@@ -26,6 +26,7 @@ import type {
   ModelRollingPredictionOutcome,
   ModelRuntimeStateAssetSnapshot,
   ModelRuntimeStateSnapshot,
+  ModelState,
   ModelStatus,
   ModelStatusPayload,
 } from "./model.types.ts";
@@ -593,6 +594,12 @@ export class ModelRuntimeService {
     }
   }
 
+  private buildHistoricalProcessingState(): ModelState {
+    // Keep the dashboard aligned with the actual work being executed.
+    const historicalProcessingState: ModelState = this.shouldEnableAutomaticPredictions ? "predicting" : "training";
+    return historicalProcessingState;
+  }
+
   private async processHistoricalAsset(asset: ModelAsset): Promise<void> {
     const blockStartAt = await this.readNextBlockStart(asset);
 
@@ -614,7 +621,7 @@ export class ModelRuntimeService {
           currentBlockEndAt: new Date(blockEndAt).toISOString(),
           currentBlockStartAt: new Date(blockStartAt).toISOString(),
           lastError: null,
-          state: "predicting",
+          state: this.buildHistoricalProcessingState(),
         });
 
         try {
