@@ -440,12 +440,16 @@ export class DashboardService {
         return badgeHtml;
       };
 
-      const buildCorrectBadge = (value) => {
+      const buildCorrectBadge = (prediction) => {
         let badgeHtml = '<span class="muted">Pending</span>';
-        if (value === true) {
+
+        if (prediction.predictedDirection === "flat" && prediction.status === "resolved") {
+          badgeHtml = '<span class="badge badge-waiting">flat</span>';
+        }
+        if (prediction.isCorrect === true) {
           badgeHtml = '<span class="badge badge-yes">yes</span>';
         }
-        if (value === false) {
+        if (prediction.isCorrect === false && prediction.predictedDirection !== "flat") {
           badgeHtml = '<span class="badge badge-no">no</span>';
         }
         return badgeHtml;
@@ -455,10 +459,10 @@ export class DashboardService {
         let badgeHtml = '<span class="muted">—</span>';
         if (prediction !== null) {
           let cssClass = "badge badge-waiting";
-          if (prediction.isCorrect === true) {
+          if (prediction.predictedDirection !== "flat" && prediction.isCorrect === true) {
             cssClass = "badge badge-yes";
           }
-          if (prediction.isCorrect === false) {
+          if (prediction.predictedDirection !== "flat" && prediction.isCorrect === false) {
             cssClass = "badge badge-no";
           }
           badgeHtml = '<span class="' + cssClass + '">' + escapeHtml(prediction.predictedDirection) + "</span>";
@@ -558,7 +562,7 @@ export class DashboardService {
             "<td>" + buildStateBadge(prediction.status === "pending" ? "waiting" : prediction.status === "resolved" ? "ready" : "error") + "</td>" +
             "<td>" + buildOutcomeBadge(prediction.predictedDirection) + "</td>" +
             "<td>" + buildOutcomeBadge(prediction.actualDirection) + "</td>" +
-            "<td>" + buildCorrectBadge(prediction.isCorrect) + "</td>" +
+            "<td>" + buildCorrectBadge(prediction) + "</td>" +
             "<td>" + escapeHtml(buildCompactPredictionValue(prediction)) + "</td>" +
             "<td>" + buildOutcomeBadge(prediction.actualDirection) + "</td>" +
             "<td class='wrap'>" + escapeHtml(formatTime(prediction.targetStartAt) + "→" + formatTime(prediction.targetEndAt)) + "</td>" +
