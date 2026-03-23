@@ -65,7 +65,32 @@ test("ModelRuntimeService restores remote crypto artifacts and serves live manua
             lastCollectorFromAt: null;
             lastProcessedBlockEndAt: null;
             lastProcessedBlockStartAt: null;
-            recentPredictionRecords: [];
+            recentPredictionRecords: Array<{
+              actualDirection: null;
+              actualReturn: null;
+              asset: "btc";
+              contextEndAt: string;
+              contextStartAt: string;
+              downValueAtPrediction: number;
+              downValueAtTargetEnd: null;
+              errorMessage: null;
+              isCorrect: null;
+              issuedAt: string;
+              predictedDirection: "up";
+              predictedProbabilityDown: number;
+              predictedProbabilityUp: number;
+              predictedReturn: number;
+              predictionId: string;
+              referenceValueAtPrediction: number;
+              referenceValueAtTargetEnd: null;
+              resolvedAt: null;
+              source: "manual";
+              status: "pending";
+              targetEndAt: string;
+              targetStartAt: string;
+              upValueAtPrediction: number;
+              upValueAtTargetEnd: null;
+            }>;
             rollingPredictionOutcomes: Array<{ isCorrect: boolean; resolvedAt: string }>;
           };
         };
@@ -78,7 +103,34 @@ test("ModelRuntimeService restores remote crypto artifacts and serves live manua
               lastCollectorFromAt: null,
               lastProcessedBlockEndAt: null,
               lastProcessedBlockStartAt: null,
-              recentPredictionRecords: [],
+              recentPredictionRecords: [
+                {
+                  actualDirection: null,
+                  actualReturn: null,
+                  asset: "btc",
+                  contextEndAt: "2025-01-01T00:09:30.000Z",
+                  contextStartAt: "2025-01-01T00:09:00.000Z",
+                  downValueAtPrediction: 0.42,
+                  downValueAtTargetEnd: null,
+                  errorMessage: null,
+                  isCorrect: null,
+                  issuedAt: "2025-01-01T00:09:30.000Z",
+                  predictedDirection: "up",
+                  predictedProbabilityDown: 0.42,
+                  predictedProbabilityUp: 0.58,
+                  predictedReturn: 0.01,
+                  predictionId: "persisted-prediction-1",
+                  referenceValueAtPrediction: 100_000,
+                  referenceValueAtTargetEnd: null,
+                  resolvedAt: null,
+                  source: "manual",
+                  status: "pending",
+                  targetEndAt: "2025-01-01T00:10:00.000Z",
+                  targetStartAt: "2025-01-01T00:09:30.000Z",
+                  upValueAtPrediction: 0.58,
+                  upValueAtTargetEnd: null,
+                },
+              ],
               rollingPredictionOutcomes: [
                 { isCorrect: true, resolvedAt: recentResolvedAt },
                 { isCorrect: false, resolvedAt: staleResolvedAt },
@@ -178,6 +230,7 @@ test("ModelRuntimeService restores remote crypto artifacts and serves live manua
 
   await modelRuntimeService.start();
   const assetStatus: ModelStatus = modelRuntimeService.getAssetStatus("btc");
+  const restoredPredictionRecords = modelRuntimeService.getPredictionRecords();
   const predictionPayload: ModelPredictionPayload = await modelRuntimeService.predict({ asset: "btc" });
   await modelRuntimeService.stop();
 
@@ -186,6 +239,7 @@ test("ModelRuntimeService restores remote crypto artifacts and serves live manua
   assert.equal(assetStatus.rollingPredictionCount, 0);
   assert.equal(assetStatus.rollingCorrectCount, 0);
   assert.equal(assetStatus.rollingHitRate, null);
+  assert.equal(restoredPredictionRecords.predictions.length, 0);
   assert.equal(predictionPayload.prediction.asset, "btc");
   assert.equal(predictionPayload.prediction.predictedDirection, "flat");
   assert.equal(predictionPayload.prediction.source, "manual");

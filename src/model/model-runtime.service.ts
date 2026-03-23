@@ -306,12 +306,8 @@ export class ModelRuntimeService {
     this.lastHistoricalBlockCompletedAt = runtimeStateSnapshot.lastHistoricalBlockCompletedAt;
     this.supportedAssets.forEach((asset) => {
       const assetState = runtimeStateSnapshot.assets[asset];
-      const recentPredictionRecords = assetState?.recentPredictionRecords || [];
-      const predictionIds = recentPredictionRecords.map((predictionRecord) => predictionRecord.predictionId);
-      recentPredictionRecords.forEach((predictionRecord) => {
-        this.predictionRegistry.set(predictionRecord.predictionId, predictionRecord);
-      });
-      this.assetPredictionRegistry.set(asset, predictionIds);
+      // Recent predictions are intentionally session-scoped and restart from empty on boot.
+      this.assetPredictionRegistry.set(asset, []);
       // Rolling metrics are intentionally session-scoped and restart from zero on boot.
       this.rollingOutcomeRegistry.set(asset, []);
       this.updateStatus(asset, {
