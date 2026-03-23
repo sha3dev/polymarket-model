@@ -451,7 +451,7 @@ export class ModelRuntimeService {
     const referenceValueAtPrediction = predictionRecord.referenceValueAtPrediction || referenceValueAtTargetEnd;
     const actualReturn = referenceValueAtPrediction > 0 ? Math.log(referenceValueAtTargetEnd / referenceValueAtPrediction) : 0;
     const actualDirection = actualReturn > 0 ? "up" : "down";
-    const isCorrect = predictionRecord.predictedDirection !== "flat" && predictionRecord.predictedDirection === actualDirection;
+    const isCorrect = predictionRecord.predictedDirection === "flat" ? null : predictionRecord.predictedDirection === actualDirection;
     const resolvedPredictionRecord: ModelPredictionRecord = {
       ...predictionRecord,
       actualDirection,

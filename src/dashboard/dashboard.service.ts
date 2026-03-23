@@ -274,16 +274,14 @@ export class DashboardService {
               <tr>
                 <th><span class="hint" title="Crypto asset handled by this service.">Asset</span></th>
                 <th><span class="hint" title="Current phase of the historical processing loop for this asset.">Phase</span></th>
-                <th><span class="hint" title="Next historical point from which the collector will continue training after restart.">Collector Cursor</span></th>
-                <th><span class="hint" title="5-minute historical block currently being processed or waited for.">Current Block</span></th>
+                <th><span class="hint" title="Start time of the 5-minute historical block currently being processed or waited for.">Current Block</span></th>
                 <th><span class="hint" title="Whether there is enough recent live data in memory to run a manual prediction now.">Live Ready</span></th>
                 <th><span class="hint" title="Timestamp of the latest live snapshot received from polymarket-snapshot.">Last Live Snapshot</span></th>
                 <th><span class="hint" title="How many successful remote training cycles this asset model has completed.">Training Count</span></th>
                 <th><span class="hint" title="Timestamp of the latest completed training cycle for this asset.">Last Training</span></th>
                 <th><span class="hint" title="Correct predictions divided by resolved predictions over the rolling recent window.">Rolling Hit Rate</span></th>
                 <th><span class="hint" title="How many resolved predictions currently contribute to the rolling hit-rate.">Rolling Count</span></th>
-                <th><span class="hint" title="Most recent prediction registered for this asset, whether automatic or manual.">Last Prediction</span></th>
-                <th><span class="hint" title="What happened once the 30-second target window finished.">Last Result</span></th>
+                <th><span class="hint" title="Most recent prediction for this asset. Green means the latest resolved prediction was correct, red means it was wrong, neutral means it is still pending.">Last Prediction</span></th>
                 <th><span class="hint" title="Latest processing error for this asset, if any.">Last Error</span></th>
                 <th><span class="hint" title="Launches a manual prediction using the most recent live buffer.">Predict</span></th>
               </tr>
@@ -296,7 +294,7 @@ export class DashboardService {
       <section class="panel section">
         <div class="section-head">
           <h2>Recent Predictions</h2>
-          <div class="section-note">Pending rows are waiting for 30 seconds of real outcome data before they can be scored.</div>
+          <div class="section-note">Pending rows are waiting for 30 seconds of real outcome data before they can be scored. Flat predictions resolve, but they do not count toward hit-rate.</div>
         </div>
         <div class="table-shell">
           <table>
@@ -332,8 +330,8 @@ export class DashboardService {
               <dd>The collector history is cut into contiguous closed windows of five minutes each. The service resumes from the last saved collector cursor after restart.</dd>
               <dt>Automatic prediction</dt>
               <dd>For each closed block, the model uses the 30 seconds immediately before the block opens to predict what will happen in the first 30 seconds inside that block. That guess is scored before the block is used for training.</dd>
-              <dt>Collector cursor</dt>
-              <dd>This is the exact point from which the next historical training request will continue. It is persisted locally.</dd>
+              <dt>Current block</dt>
+              <dd>This is the start timestamp of the 5-minute historical block the service is currently waiting for or processing.</dd>
             </dl>
           </article>
           <article class="help-card">
@@ -355,7 +353,7 @@ export class DashboardService {
               <dt>Final Up / Final Down</dt>
               <dd>The realized binary outcome after 30 seconds. One side becomes 1 and the other becomes 0.</dd>
               <dt>Rolling hit-rate</dt>
-              <dd>The share of correct resolved predictions over the last 2 hours for that asset.</dd>
+              <dd>The share of correct non-flat resolved predictions over the last 2 hours for that asset.</dd>
             </dl>
           </article>
         </div>
@@ -453,6 +451,21 @@ export class DashboardService {
         return badgeHtml;
       };
 
+      const buildLatestPredictionBadge = (prediction) => {
+        let badgeHtml = '<span class="muted">—</span>';
+        if (prediction !== null) {
+          let cssClass = "badge badge-waiting";
+          if (prediction.isCorrect === true) {
+            cssClass = "badge badge-yes";
+          }
+          if (prediction.isCorrect === false) {
+            cssClass = "badge badge-no";
+          }
+          badgeHtml = '<span class="' + cssClass + '">' + escapeHtml(prediction.predictedDirection) + "</span>";
+        }
+        return badgeHtml;
+      };
+
       const buildCompactPredictionValue = (prediction) => {
         const upValue = prediction.upValueAtPrediction || 0;
         const downValue = prediction.downValueAtPrediction || 0;
@@ -487,31 +500,20 @@ export class DashboardService {
       const renderAssets = () => {
         assetTableBody.innerHTML = state.assets.map((asset) => {
           const latestPrediction = asset.latestPrediction;
-          const lastPredictionText = latestPrediction === null ? "—" : latestPrediction.predictedDirection + " @ " + formatDate(latestPrediction.issuedAt);
-          const lastResultText =
-            latestPrediction === null
-              ? "—"
-              : latestPrediction.status === "pending"
-                ? "Pending"
-                : latestPrediction.status === "resolved"
-                  ? latestPrediction.actualDirection + " / " + (latestPrediction.isCorrect ? "correct" : "wrong")
-                  : "Error";
           const buttonLabel = state.isPredicting[asset.asset] ? "Running…" : "Predict";
           const buttonDisabled = state.isPredicting[asset.asset] || !asset.isLiveReady;
           return (
             "<tr>" +
               "<td>" + escapeHtml(asset.asset.toUpperCase()) + "</td>" +
               "<td>" + buildStateBadge(asset.state) + "</td>" +
-              "<td>" + escapeHtml(formatTime(asset.lastCollectorFromAt)) + "</td>" +
-              "<td>" + escapeHtml((asset.currentBlockStartAt && asset.currentBlockEndAt) ? formatTime(asset.currentBlockStartAt) + "→" + formatTime(asset.currentBlockEndAt) : "—") + "</td>" +
+              "<td>" + escapeHtml(asset.currentBlockStartAt === null ? "—" : formatDate(asset.currentBlockStartAt)) + "</td>" +
               "<td>" + buildStateBadge(asset.isLiveReady ? "ready" : "waiting") + "</td>" +
               "<td>" + escapeHtml(formatTime(asset.lastLiveSnapshotAt)) + "</td>" +
               "<td>" + escapeHtml(String(asset.trainingCount)) + "</td>" +
               "<td>" + escapeHtml(formatTime(asset.lastTrainingAt)) + "</td>" +
               "<td>" + escapeHtml(formatPercent(asset.rollingHitRate)) + "</td>" +
               "<td>" + escapeHtml(String(asset.rollingPredictionCount)) + "</td>" +
-              "<td class='wrap'>" + escapeHtml(latestPrediction === null ? "—" : latestPrediction.predictedDirection + " @ " + formatTime(latestPrediction.issuedAt)) + "</td>" +
-              "<td class='wrap'>" + escapeHtml(lastResultText) + "</td>" +
+              "<td>" + buildLatestPredictionBadge(latestPrediction) + "</td>" +
               "<td class='wrap'>" + escapeHtml(asset.lastError || "—") + "</td>" +
               "<td><button data-asset='" + escapeHtml(asset.asset) + "'" + (buttonDisabled ? " disabled" : "") + ">" + escapeHtml(buttonLabel) + "</button></td>" +
             "</tr>"

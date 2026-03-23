@@ -389,12 +389,107 @@ When you press `Predict`:
 
 ### What A Prediction Means
 
-The prediction is binary:
+The realized market outcome is binary:
 
 - `up`
 - `down`
 
-The service still keeps a continuous predicted return and a probability split:
+The model prediction itself keeps two pieces of information at the same time:
+
+- a continuous forecast called `predictedReturn`
+- a direction-confidence split called `predictedProbabilityUp` / `predictedProbabilityDown`
+
+#### How TensorFlow Output Becomes Prediction Confidence
+
+The remote model has two output heads:
+
+1. `regression`
+   - one scalar value
+   - interpreted as the expected log-return over the target horizon
+   - this becomes `predictedReturn`
+
+2. `classification`
+   - two raw scores, one for `down` and one for `up`
+   - these are logits, not probabilities yet
+
+When `tensorflow-api` returns a prediction, this service decodes it like this:
+
+1. read `outputs.regression[0][0]`
+   - this becomes `predictedReturn`
+2. read `outputs.classification[0]`
+   - this is a two-value vector `[downLogit, upLogit]`
+3. apply softmax to those two logits
+   - exponentiate both after subtracting the max logit for numerical stability
+   - divide each exponential by the sum of both exponentials
+4. store the result as:
+   - `predictedProbabilityDown`
+   - `predictedProbabilityUp`
+
+In plain language:
+
+- if the classification head strongly prefers `up`, `Pred Up` will be close to `1.0`
+- if it strongly prefers `down`, `Pred Down` will be close to `1.0`
+- if both sides are almost identical, the model is effectively undecided
+
+#### How We Turn Confidence Into `up`, `down`, Or `flat`
+
+The dashboard and prediction record expose a discrete direction in `predictedDirection`.
+
+The rule is:
+
+1. compare `predictedProbabilityUp` vs `predictedProbabilityDown`
+2. if the gap is meaningfully positive, choose the larger side:
+   - `up` if `predictedProbabilityUp > predictedProbabilityDown`
+   - `down` if `predictedProbabilityDown > predictedProbabilityUp`
+3. if the gap is effectively zero, mark the prediction as:
+   - `flat`
+
+Today, “effectively zero” means the absolute probability gap is at most `0.0005`.
+
+So:
+
+- `up = 0.73`, `down = 0.27` becomes `predictedDirection = "up"`
+- `up = 0.41`, `down = 0.59` becomes `predictedDirection = "down"`
+- `up = 0.50`, `down = 0.50` becomes `predictedDirection = "flat"`
+
+If for some reason the classification probabilities are missing or malformed, the service falls back to the sign of `predictedReturn`:
+
+- positive return -> `up`
+- zero or negative return -> `down`
+
+That fallback is only there as a safety net. Under normal operation, direction comes from the classification probabilities.
+
+#### What `Pred Up` And `Pred Down` Mean In The Dashboard
+
+These values are not market-implied probabilities from an exchange.
+
+They are the model's own directional confidence at the moment the prediction was made.
+
+Examples:
+
+- `Pred = U 0.82`
+  - the model assigned about `82%` probability to `up`
+- `Pred = D 0.61`
+  - the model assigned about `61%` probability to `down`
+- `Pred = F 0.50`
+  - the model was effectively tied and the discrete prediction is `flat`
+
+#### How Confidence And Return Relate
+
+`predictedReturn` and `predictedDirection` are related, but they are not the same thing:
+
+- `predictedReturn`
+  - how large the move is expected to be, in continuous log-return terms
+- `predictedDirection`
+  - which side the classification head prefers after converting logits to probabilities
+
+This means you should treat:
+
+- `predictedReturn` as the magnitude-style forecast
+- `Pred Up / Pred Down` as the confidence-style forecast
+- `predictedDirection` as the compact operator-facing label
+
+The service still keeps a probability split:
 
 - `Pred Up`
 - `Pred Down`
@@ -423,45 +518,116 @@ Then the crypto feature builder creates a fixed-length sequence from the recent 
 
 Current crypto features used:
 
+##### Chainlink / reference-price features
+
 - `cl_log_px`
+  - natural logarithm of the current Chainlink price
 - `cl_stale_s`
+  - age of the latest Chainlink update in seconds, capped
 - `cl_ret_30s`
+  - 30-second Chainlink log-return
+
+##### Exchange vs Chainlink relationship features
+
 - `ex_cl_basis`
+  - log difference between aggregated exchange price and Chainlink price
 - `ex_cl_basis_chg_5s`
+  - how that exchange-vs-Chainlink basis changed over the last 5 seconds
+
+##### Exchange return and momentum features
+
 - `ex_logret_1s`
+  - 1-second exchange log-return
 - `ex_logret_5s`
+  - 5-second exchange log-return
 - `ex_logret_15s`
+  - 15-second exchange log-return
 - `ex_logret_30s`
+  - 30-second exchange log-return
 - `ex_mom_5s_mean`
+  - short momentum-style mean return over the last 5 seconds
 - `ex_rv_10s`
+  - realized volatility over the last 10 seconds
 - `ex_rv_30s`
+  - realized volatility over the last 30 seconds
 - `ex_ret_accel`
+  - simple acceleration term comparing very short return with recent 5-second trend
+
+##### Exchange order-book quality features
+
 - `ex_spread_med`
+  - median spread across exchanges
 - `ex_spread_wmean`
+  - weighted mean spread across exchanges
 - `ex_depth3_log`
+  - log-transformed aggregated depth near the book
 - `ex_imb1_wmean`
+  - weighted mean top-level order-book imbalance
 - `ex_imb3_wmean`
+  - weighted mean 3-level order-book imbalance
 - `ex_imb3_chg_5s`
+  - how 3-level imbalance changed over the last 5 seconds
 - `ex_disp_log`
+  - log dispersion across exchange prices
 - `ex_disp_chg_5s`
+  - 5-second change in exchange-price dispersion
 - `ex_best_stale_s`
+  - staleness of the freshest exchange source in seconds
 - `ex_mean_stale_s`
+  - average exchange-source staleness in seconds
 - `ex_valid_px_n`
+  - number of exchanges contributing a valid price
 - `ex_valid_book_n`
+  - number of exchanges contributing a valid order book
+
+##### Venue premium features
+
 - `binance_premium`
+  - log premium of Binance mid-price vs aggregated exchange price
 - `coinbase_premium`
+  - log premium of Coinbase mid-price vs aggregated exchange price
 - `okx_premium`
+  - log premium of OKX mid-price vs aggregated exchange price
 - `kraken_premium`
+  - log premium of Kraken mid-price vs aggregated exchange price
+
+##### Cross-asset leader and breadth features
+
 - `leader_ret_5s`
+  - 5-second return of the configured leader asset for the current asset
 - `leader_ret_15s`
+  - 15-second return of that leader asset
 - `leader_imb3`
+  - 3-level book imbalance of that leader asset
 - `breadth_ret_5s`
+  - average 5-second return across the rest of the supported asset set
 - `disp_ret_5s`
+  - cross-asset dispersion of recent 5-second returns
+
+##### Shock features
+
 - `btc_shock`
+  - normalized short-term BTC move divided by BTC short-term realized volatility
 - `eth_shock`
+  - normalized short-term ETH move divided by ETH short-term realized volatility
+
+##### Quality and gating flags
+
 - `cl_valid_flag`
+  - `1` if Chainlink is currently considered fresh enough, else `0`
 - `cl_update_recent_60s`
+  - `1` if Chainlink updated within the last 60 seconds, else `0`
 - `ex_valid_gate_flag`
+  - `1` if at least two exchanges currently contribute valid price data, else `0`
+
+In short, the feature set mixes:
+
+- current reference price state
+- recent returns and volatility
+- exchange book quality
+- exchange-vs-reference dislocations
+- cross-asset context
+- data quality flags
 
 #### What Is The Target?
 
@@ -476,10 +642,125 @@ The target return is:
 log(price(T + 30s) / price(T))
 ```
 
+This is a log-return, not a raw USD delta.
+
+That matters because:
+
+- it is unitless
+- it scales naturally across assets with very different prices
+- it behaves much better numerically than predicting absolute USD moves
+
+Rough intuition:
+
+- a small positive log-return means “price is expected to be a bit higher”
+- a small negative log-return means “price is expected to be a bit lower”
+- values near zero mean “little expected movement”
+
 Direction label:
 
 - `up` if target return > 0
 - `down` otherwise
+
+#### How One Numeric Target Becomes Both Return And Confidence
+
+The important point is:
+
+- the service does **not** convert “we expect +X USD” directly into a probability like `70% up`
+
+Instead, it trains two targets from the same future move:
+
+1. regression target
+   - the exact future log-return
+   - example: `+0.0018` or `-0.0009`
+   - this trains the `regression` head
+
+2. classification target
+   - a binary label derived only from the sign of that same log-return
+   - `1` for `up`
+   - `0` for `down`
+   - this trains the `classification` head
+
+So the pipeline is:
+
+1. compute future log-return over the next 30 seconds
+2. keep that number as the regression target
+3. also collapse its sign into a binary `up/down` label
+4. train the model to predict both at the same time
+
+That is why the service can expose:
+
+- `predictedReturn`
+  - from the regression head
+- `Pred Up` / `Pred Down`
+  - from the classification head
+
+Those probabilities are therefore learned directly from many historical examples of:
+
+- feature sequence -> future direction label
+
+They are not produced by taking a USD move and applying an ad hoc formula afterward.
+
+#### What Scale Is Used?
+
+The scale used by the regression target is log-return:
+
+```text
+targetReturn = log(price(T + 30s) / price(T))
+```
+
+It is **not**:
+
+- raw USD change
+- raw percentage string
+- z-score
+
+The classification target uses the sign of that same log-return:
+
+- positive -> `up`
+- zero or negative -> `down`
+
+#### How `Pred Up` / `Pred Down` Are Learned
+
+During training, the binary direction labels are converted into one-hot vectors:
+
+- `down` -> `[1, 0]`
+- `up` -> `[0, 1]`
+
+The classification head outputs two logits:
+
+- one for `down`
+- one for `up`
+
+At inference time we apply softmax to those logits, which gives:
+
+- `predictedProbabilityDown`
+- `predictedProbabilityUp`
+
+So if the model has seen many past patterns where the same type of feature sequence was followed by upward movement, it learns to push more mass into `Pred Up`.
+
+If it has seen the opposite, it pushes more mass into `Pred Down`.
+
+#### Why Confidence Is Not Expressed In USD
+
+Suppose BTC is at `100,000` and the model predicts a move of `+25 USD`.
+
+That alone does not define a probability, because probability depends on uncertainty, not just expected magnitude.
+
+Two examples can have the same expected move but very different certainty:
+
+- one context may strongly and consistently imply `up`
+- another may be noisy, so the model may still think `up` is only slightly more likely than `down`
+
+That is exactly why the service keeps two heads:
+
+- one head for expected move size (`predictedReturn`)
+- one head for directional confidence (`Pred Up` / `Pred Down`)
+
+So the answer to “how do we convert expected USD move into confidence?” is:
+
+- we do not
+- confidence comes from a separately trained binary classification head
+- both heads share the same input features, but they solve different prediction tasks
 
 #### Which Price Is Used?
 
