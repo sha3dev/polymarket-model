@@ -183,9 +183,9 @@ test("ModelRuntimeService restores remote crypto artifacts and serves live manua
 
   assert.equal(assetStatus.trainingCount, 3);
   assert.equal(assetStatus.isLiveReady, true);
-  assert.equal(assetStatus.rollingPredictionCount, 1);
-  assert.equal(assetStatus.rollingCorrectCount, 1);
-  assert.equal(assetStatus.rollingHitRate, 1);
+  assert.equal(assetStatus.rollingPredictionCount, 0);
+  assert.equal(assetStatus.rollingCorrectCount, 0);
+  assert.equal(assetStatus.rollingHitRate, null);
   assert.equal(predictionPayload.prediction.asset, "btc");
   assert.equal(predictionPayload.prediction.predictedDirection, "flat");
   assert.equal(predictionPayload.prediction.source, "manual");

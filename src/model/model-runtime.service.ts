@@ -312,8 +312,8 @@ export class ModelRuntimeService {
         this.predictionRegistry.set(predictionRecord.predictionId, predictionRecord);
       });
       this.assetPredictionRegistry.set(asset, predictionIds);
-      this.rollingOutcomeRegistry.set(asset, [...(assetState?.rollingPredictionOutcomes || [])]);
-      this.pruneRollingOutcomes(asset, Date.now());
+      // Rolling metrics are intentionally session-scoped and restart from zero on boot.
+      this.rollingOutcomeRegistry.set(asset, []);
       this.updateStatus(asset, {
         currentBlockEndAt: assetState?.lastProcessedBlockEndAt || null,
         currentBlockStartAt: assetState?.lastProcessedBlockStartAt || null,
@@ -729,6 +729,7 @@ export class ModelRuntimeService {
     if (!this.isStarted) {
       await this.modelTrainingService.ensureTensorflowApi();
       await this.restorePersistedState();
+      await this.persistRuntimeState();
       await this.snapshotStoreService.start();
       this.refreshLiveStatusFields();
       this.processingTimer = setInterval(() => {
